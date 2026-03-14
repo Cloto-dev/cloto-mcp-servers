@@ -19,7 +19,7 @@ Extracted from the ClotoCore monorepo at commit `f9ea920`.
 | `mind.deepseek` | Mind | DeepSeek reasoning engine |
 | `mind.claude` | Mind | Claude/Anthropic reasoning engine |
 | `mind.ollama` | Mind | Ollama local LLM |
-| `memory.cpersona` | Memory | CPersona persistent memory with FTS5 search |
+| `memory.cpersona` | Memory | CPersona persistent memory with FTS5 search (MIT) |
 | `vision.gaze_webcam` | Vision | Webcam gaze tracking |
 | `vision.capture` | Vision | Image capture with Ollama + OCR |
 | `voice.stt` | Voice | Speech-to-text (Whisper) |
@@ -74,6 +74,15 @@ python -m pytest tests/ -v
 
 ## License
 
-BSL 1.1 (converts to MIT on 2028-02-14). See [LICENSE](LICENSE).
+This repository uses a dual-license model:
+
+| Component | License |
+|---|---|
+| **CPersona** (`servers/cpersona/`) | MIT |
+| **MGP Protocol** (`docs/MGP_*.md`) | MIT |
+| All other servers and code | BSL 1.1 (converts to MIT on 2028-02-14) |
+
+See [LICENSE](LICENSE) for the BSL 1.1 terms. CPersona and MGP are independently
+MIT-licensed to enable adoption by any MCP host without restriction.
 
 Contact: ClotoCore@proton.me
