@@ -1,0 +1,279 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-03-15T00:00:00Z",
+  "servers": [
+    {
+      "id": "tool.terminal",
+      "name": "Terminal",
+      "description": "Sandboxed command execution with pattern-based safety validation",
+      "category": "tool",
+      "version": "0.1.0",
+      "directory": "terminal",
+      "dependencies": ["common"],
+      "env_vars": [],
+      "optional_env_vars": [],
+      "tags": ["core", "shell", "command"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "terminal"
+    },
+    {
+      "id": "tool.agent_utils",
+      "name": "Agent Utilities",
+      "description": "Deterministic utility tools (time, math, UUID, units, encode/decode)",
+      "category": "tool",
+      "version": "0.1.0",
+      "directory": "agent_utils",
+      "dependencies": ["common"],
+      "env_vars": [],
+      "optional_env_vars": [],
+      "tags": ["core", "utility", "math"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "wrench"
+    },
+    {
+      "id": "tool.cron",
+      "name": "CRON Scheduler",
+      "description": "CRON job management via kernel REST API",
+      "category": "tool",
+      "version": "0.1.0",
+      "directory": "cron",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "CLOTO_API_URL", "default": "http://127.0.0.1:8081", "description": "Kernel API URL" },
+        { "key": "CLOTO_API_KEY", "default": "${CLOTO_API_KEY}", "description": "Kernel API key" }
+      ],
+      "optional_env_vars": [],
+      "tags": ["core", "scheduler"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "clock"
+    },
+    {
+      "id": "tool.embedding",
+      "name": "Embedding",
+      "description": "Vector embedding generation (local ONNX + API providers)",
+      "category": "tool",
+      "version": "0.1.0",
+      "directory": "embedding",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "EMBEDDING_PROVIDER", "default": "onnx_miniml", "description": "Embedding provider" },
+        { "key": "EMBEDDING_HTTP_PORT", "default": "8401", "description": "HTTP server port" }
+      ],
+      "optional_env_vars": [],
+      "tags": ["core", "embedding", "vector"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "layers"
+    },
+    {
+      "id": "tool.websearch",
+      "name": "Web Search",
+      "description": "Web search with fallback chain (SearXNG, Tavily, DuckDuckGo)",
+      "category": "tool",
+      "version": "0.1.0",
+      "directory": "websearch",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "CLOTO_SEARCH_PROVIDER", "default": "auto", "description": "Search provider" }
+      ],
+      "optional_env_vars": [
+        { "key": "SEARXNG_URL", "default": "http://localhost:8080", "description": "SearXNG instance URL" },
+        { "key": "TAVILY_API_KEY", "default": "", "description": "Tavily API key" }
+      ],
+      "tags": ["search", "web"],
+      "trust_level": "standard",
+      "auto_restart": true,
+      "icon": "search"
+    },
+    {
+      "id": "tool.research",
+      "name": "Research",
+      "description": "Multi-engine research synthesis pipeline",
+      "category": "tool",
+      "version": "0.1.0",
+      "directory": "research",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "CLOTO_SEARCH_PROVIDER", "default": "auto", "description": "Search provider" }
+      ],
+      "optional_env_vars": [
+        { "key": "SEARXNG_URL", "default": "http://localhost:8080", "description": "SearXNG instance URL" },
+        { "key": "TAVILY_API_KEY", "default": "", "description": "Tavily API key" },
+        { "key": "RESEARCH_EXTRACT_PROVIDER", "default": "cerebras", "description": "Extraction LLM provider" },
+        { "key": "RESEARCH_EVALUATE_PROVIDER", "default": "deepseek", "description": "Evaluation LLM provider" },
+        { "key": "RESEARCH_SYNTHESIZE_PROVIDER", "default": "deepseek", "description": "Synthesis LLM provider" }
+      ],
+      "tags": ["research", "synthesis"],
+      "trust_level": "standard",
+      "auto_restart": true,
+      "icon": "book-open"
+    },
+    {
+      "id": "tool.imagegen",
+      "name": "Image Generation",
+      "description": "Image generation via Stable Diffusion WebUI API",
+      "category": "tool",
+      "version": "0.1.0",
+      "directory": "imagegen",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "SD_API_URL", "default": "http://127.0.0.1:7860", "description": "Stable Diffusion API URL" }
+      ],
+      "optional_env_vars": [],
+      "tags": ["image", "generation"],
+      "trust_level": "standard",
+      "auto_restart": false,
+      "icon": "image"
+    },
+    {
+      "id": "mind.deepseek",
+      "name": "DeepSeek",
+      "description": "DeepSeek reasoning engine via LLM proxy",
+      "category": "mind",
+      "version": "0.1.0",
+      "directory": "deepseek",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "DEEPSEEK_API_URL", "default": "http://127.0.0.1:8082/v1/chat/completions", "description": "LLM proxy endpoint" },
+        { "key": "DEEPSEEK_PROVIDER", "default": "deepseek", "description": "Provider name for proxy routing" }
+      ],
+      "optional_env_vars": [],
+      "tags": ["engine", "reasoning", "llm"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "cpu"
+    },
+    {
+      "id": "mind.cerebras",
+      "name": "Cerebras",
+      "description": "Cerebras ultra-high-speed reasoning engine",
+      "category": "mind",
+      "version": "0.1.0",
+      "directory": "cerebras",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "CEREBRAS_API_URL", "default": "http://127.0.0.1:8082/v1/chat/completions", "description": "LLM proxy endpoint" },
+        { "key": "CEREBRAS_PROVIDER", "default": "cerebras", "description": "Provider name for proxy routing" }
+      ],
+      "optional_env_vars": [],
+      "tags": ["engine", "reasoning", "llm", "fast"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "zap"
+    },
+    {
+      "id": "mind.claude",
+      "name": "Claude",
+      "description": "Anthropic Claude integration via native Messages API",
+      "category": "mind",
+      "version": "0.1.0",
+      "directory": "claude",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "CLAUDE_API_URL", "default": "http://127.0.0.1:8082/v1/messages", "description": "LLM proxy endpoint" },
+        { "key": "CLAUDE_PROVIDER", "default": "claude", "description": "Provider name for proxy routing" }
+      ],
+      "optional_env_vars": [],
+      "tags": ["engine", "reasoning", "llm", "anthropic"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "sparkles"
+    },
+    {
+      "id": "mind.ollama",
+      "name": "Ollama",
+      "description": "Local model inference via Ollama",
+      "category": "mind",
+      "version": "0.1.0",
+      "directory": "ollama",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "OLLAMA_BASE_URL", "default": "http://localhost:11434", "description": "Ollama API URL" }
+      ],
+      "optional_env_vars": [
+        { "key": "OLLAMA_MODEL", "default": "", "description": "Default model name" },
+        { "key": "OLLAMA_ENABLE_THINKING", "default": "", "description": "Enable thinking mode" }
+      ],
+      "tags": ["engine", "reasoning", "llm", "local"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "box"
+    },
+    {
+      "id": "memory.cpersona",
+      "name": "CPersona Memory",
+      "description": "Persistent character persona memory with FTS5 search and anti-contamination",
+      "category": "memory",
+      "version": "0.1.0",
+      "directory": "cpersona",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "CPERSONA_EMBEDDING_MODE", "default": "http", "description": "Embedding mode (http or local)" },
+        { "key": "CPERSONA_EMBEDDING_URL", "default": "http://127.0.0.1:8401/embed", "description": "Embedding endpoint" }
+      ],
+      "optional_env_vars": [
+        { "key": "CPERSONA_LLM_PROVIDER", "default": "cerebras", "description": "LLM provider for summarization" },
+        { "key": "CPERSONA_LLM_MODEL", "default": "gpt-oss-120b", "description": "LLM model for summarization" }
+      ],
+      "tags": ["core", "memory", "persona", "embedding"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "brain"
+    },
+    {
+      "id": "vision.capture",
+      "name": "Screen Capture",
+      "description": "Screen capture with OCR and visual analysis via Ollama",
+      "category": "vision",
+      "version": "0.1.0",
+      "directory": "capture",
+      "dependencies": ["common"],
+      "env_vars": [],
+      "optional_env_vars": [
+        { "key": "VISION_OLLAMA_URL", "default": "http://localhost:11434", "description": "Ollama URL for visual analysis" },
+        { "key": "VISION_MODEL", "default": "llava", "description": "Vision model name" },
+        { "key": "VISION_OCR_MODE", "default": "hybrid", "description": "OCR mode (hybrid, paddle, tesseract)" }
+      ],
+      "tags": ["vision", "screenshot", "ocr"],
+      "trust_level": "standard",
+      "auto_restart": false,
+      "icon": "monitor"
+    },
+    {
+      "id": "vision.gaze_webcam",
+      "name": "Gaze Tracking",
+      "description": "Webcam gaze tracking via MediaPipe",
+      "category": "vision",
+      "version": "0.1.0",
+      "directory": "gaze",
+      "dependencies": ["common"],
+      "env_vars": [],
+      "optional_env_vars": [],
+      "tags": ["vision", "gaze", "webcam"],
+      "trust_level": "standard",
+      "auto_restart": false,
+      "icon": "eye"
+    },
+    {
+      "id": "voice.stt",
+      "name": "Speech-to-Text",
+      "description": "Speech recognition via faster-whisper",
+      "category": "voice",
+      "version": "0.1.0",
+      "directory": "stt",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "STT_MODEL", "default": "base", "description": "Whisper model size" },
+        { "key": "STT_LANGUAGE", "default": "ja", "description": "Target language" }
+      ],
+      "optional_env_vars": [],
+      "tags": ["voice", "speech", "whisper"],
+      "trust_level": "standard",
+      "auto_restart": false,
+      "icon": "mic"
+    }
+  ]
+}
