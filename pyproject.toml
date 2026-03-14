@@ -1,0 +1,10 @@
+[project]
+name = "cloto-mcp-servers"
+version = "0.1.0"
+description = "MCP/MGP servers for the ClotoCore platform"
+requires-python = ">=3.10"
+license = "BSL-1.1"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

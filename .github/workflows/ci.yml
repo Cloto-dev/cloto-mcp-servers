@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          cd servers
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip --quiet
+          for d in */; do
+            if [ -f "$d/pyproject.toml" ] && [ "$d" != "common/" ] && [ "$d" != "tests/" ]; then
+              .venv/bin/pip install "$d" --quiet
+            fi
+          done
+
+      - name: Run tests
+        run: |
+          cd servers
+          .venv/bin/python -m pytest tests/ -v
