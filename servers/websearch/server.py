@@ -106,17 +106,19 @@ async def check_provider_status(name: str) -> dict:
             "setup_hint": "Register at https://tavily.com (free, no credit card) and add TAVILY_API_KEY to .env." if not configured else None,
         }
     elif name == "duckduckgo":
+        # DuckDuckGo HTML scraping — no external deps, always available
         try:
-            from ddgs import DDGS  # noqa: F401
-            importable = True
-        except ImportError:
-            importable = False
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get("https://html.duckduckgo.com/html/", params={"q": "test"})
+                reachable = resp.status_code == 200
+        except Exception:
+            reachable = False
         return {
             "name": name,
-            "configured": importable,
-            "reachable": importable,
-            "note": "Zero-config fallback. Rate-limited and unstable — upgrade to SearXNG or Tavily recommended."
-                if importable else "ddgs package not installed. Run: pip install ddgs",
+            "configured": True,
+            "reachable": reachable,
+            "note": "Zero-config fallback via HTML scraping. No external deps required."
+                if reachable else "DuckDuckGo HTML endpoint unreachable.",
         }
     return {"name": name, "configured": False, "reachable": False}
 

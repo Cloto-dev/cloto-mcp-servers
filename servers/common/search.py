@@ -104,25 +104,68 @@ class TavilyProvider(SearchProvider):
 
 
 class DuckDuckGoProvider(SearchProvider):
-    """DuckDuckGo via ddgs — zero-config, no API key, rate-limited."""
+    """DuckDuckGo via HTML scraping — zero-config, no API key, no external deps.
+
+    The `ddgs` package (v9+) switched its backend to Brave Search, breaking
+    DuckDuckGo functionality. This provider scrapes DuckDuckGo's HTML endpoint
+    directly, which is stable and does not require any third-party library.
+    """
     name = "duckduckgo"
 
     async def search(self, query: str, max_results: int, language: str, time_range: str | None) -> list[dict]:
-        from ddgs import DDGS
+        import re
+        from html import unescape
+        from urllib.parse import parse_qs, urlparse
 
-        ddgs_timelimit = None
-        if time_range:
-            ddgs_timelimit = time_range[0]  # "d", "w", "m", "y"
+        params: dict = {"q": query}
+        if language and language != "en":
+            params["kl"] = language
 
-        def _sync_search() -> list[dict]:
-            with DDGS() as ddgs:
-                raw = ddgs.text(query, max_results=max_results, timelimit=ddgs_timelimit)
-                return [
-                    {"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")}
-                    for r in raw
-                ]
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
+            resp = await client.get(
+                "https://html.duckduckgo.com/html/",
+                params=params,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; ClotoCore/0.6)"},
+            )
+            resp.raise_for_status()
 
-        return await asyncio.to_thread(_sync_search)
+        html = resp.text
+        results: list[dict] = []
+
+        # Parse result blocks: <a class="result__a" href="...">title</a>
+        for match in re.finditer(
+            r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        ):
+            if len(results) >= max_results:
+                break
+            raw_url = unescape(match.group(1))
+            title = re.sub(r"<[^>]+>", "", match.group(2)).strip()
+            title = unescape(title)
+
+            # Resolve DuckDuckGo redirect URLs (//duckduckgo.com/l/?uddg=<actual_url>)
+            url = raw_url
+            if "uddg=" in raw_url:
+                parsed = parse_qs(urlparse(raw_url).query)
+                if "uddg" in parsed:
+                    url = parsed["uddg"][0]
+
+            # Extract snippet from nearby result__snippet
+            snippet = ""
+            snippet_match = re.search(
+                r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
+                html[match.end():match.end() + 2000],
+                re.DOTALL,
+            )
+            if snippet_match:
+                snippet = re.sub(r"<[^>]+>", "", snippet_match.group(1)).strip()
+                snippet = unescape(snippet)
+
+            if url and url.startswith("http"):
+                results.append({"title": title, "url": url, "snippet": snippet})
+
+        return results
 
 
 class ChainProvider(SearchProvider):
