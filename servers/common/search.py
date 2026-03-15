@@ -121,7 +121,7 @@ class DuckDuckGoProvider(SearchProvider):
         if language and language != "en":
             params["kl"] = language
 
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True, proxy=None) as client:
             resp = await client.get(
                 "https://html.duckduckgo.com/html/",
                 params=params,

@@ -34,7 +34,7 @@ provider = create_search_provider()
 
 async def fetch_page_content(url: str, max_length: int) -> str:
     """Fetch a URL and extract text content."""
-    client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True)
+    client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True, proxy=None)
     try:
         resp = await client.get(url, headers={
             "User-Agent": "ClotoCore/0.4 (Web Search MCP Server)",
@@ -107,18 +107,23 @@ async def check_provider_status(name: str) -> dict:
         }
     elif name == "duckduckgo":
         # DuckDuckGo HTML scraping — no external deps, always available
+        error_detail = None
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get("https://html.duckduckgo.com/html/", params={"q": "test"})
+            async with httpx.AsyncClient(timeout=10, proxy=None) as client:
+                resp = await client.get("https://html.duckduckgo.com/html/", params={"q": "test"},
+                                        headers={"User-Agent": "Mozilla/5.0 (compatible; ClotoCore/0.6)"})
                 reachable = resp.status_code == 200
-        except Exception:
+                if not reachable:
+                    error_detail = f"HTTP {resp.status_code}"
+        except Exception as e:
             reachable = False
+            error_detail = f"{type(e).__name__}: {e}"
         return {
             "name": name,
             "configured": True,
             "reachable": reachable,
             "note": "Zero-config fallback via HTML scraping. No external deps required."
-                if reachable else "DuckDuckGo HTML endpoint unreachable.",
+                if reachable else f"DuckDuckGo HTML endpoint unreachable. Error: {error_detail}",
         }
     return {"name": name, "configured": False, "reachable": False}
 
