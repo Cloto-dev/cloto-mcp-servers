@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'FILE=$(cat | jq -r \".tool_input.file_path\"); case \"$FILE\" in */servers/*.py) ruff format \"$FILE\" 2>&1 | tail -5; ruff check --fix \"$FILE\" 2>&1 | tail -5 ;; esac; exit 0'"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://github.com/Cloto-dev/ClotoCore/blob/master/qa/issue-registry.schema.md",
+  "version": "1.0",
+  "description": "Mechanical verification registry for documented issues. Source of truth for bug existence proof.",
+  "issues": []
+}
