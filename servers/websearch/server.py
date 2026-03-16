@@ -232,11 +232,7 @@ async def handle_search_status(arguments: dict) -> dict:
             active = s["name"]
             break
 
-    # Debug: include proxy env vars to diagnose connectivity issues
-    proxy_env = {k: os.environ.get(k, "<not set>") for k in
-                 ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY",
-                  "CLOTO_LLM_PROXY", "CLOTO_LLM_PROXY_PORT", "NO_PROXY"]}
-    return {"mode": PROVIDER, "active_provider": active, "chain": chain, "debug_proxy_env": proxy_env}
+    return {"mode": PROVIDER, "active_provider": active, "chain": chain}
 
 
 # ============================================================
