@@ -15,6 +15,13 @@
 - Test ratchet: `bash scripts/check-test-count.sh`
 - Sentinel: `bash scripts/sentinel.sh`
 
+## Rust Server Commands (servers/avatar/)
+
+- Build: `cd servers/avatar && cargo build`
+- Lint: `cd servers/avatar && cargo clippy -- -D warnings`
+- Format check: `cd servers/avatar && cargo fmt -- --check`
+- Format: `cd servers/avatar && cargo fmt`
+
 ## Bug Verification
 
 - Source of truth: `qa/issue-registry.json`

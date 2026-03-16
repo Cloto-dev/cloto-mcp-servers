@@ -76,6 +76,23 @@ jobs:
       - name: Verify issue registry
         run: bash scripts/verify-issues.sh
 
+  rust:
+    name: Rust Build (avatar)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo fmt check
+        run: cd servers/avatar && cargo fmt -- --check
+
+      - name: Cargo clippy
+        run: cd servers/avatar && cargo clippy -- -D warnings
+
+      - name: Cargo build
+        run: cd servers/avatar && cargo build
+
   sentinel:
     name: Sentinel
     runs-on: ubuntu-latest
