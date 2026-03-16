@@ -12,17 +12,16 @@ Phase 5: Background task queue (DB-persisted, crash-recoverable) — COMPLETE
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import struct
-import hashlib
+import sys
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
-
-import sys
 
 import aiosqlite
 import httpx
@@ -52,9 +51,7 @@ FTS_ENABLED = os.environ.get("CPERSONA_FTS_ENABLED", "true").lower() == "true"
 EMBEDDING_MODE = os.environ.get("CPERSONA_EMBEDDING_MODE", "none")
 EMBEDDING_URL = os.environ.get("CPERSONA_EMBEDDING_URL", "")
 EMBEDDING_API_KEY = os.environ.get("CPERSONA_EMBEDDING_API_KEY", "")
-EMBEDDING_API_URL = os.environ.get(
-    "CPERSONA_EMBEDDING_API_URL", "https://api.openai.com/v1/embeddings"
-)
+EMBEDDING_API_URL = os.environ.get("CPERSONA_EMBEDDING_API_URL", "https://api.openai.com/v1/embeddings")
 EMBEDDING_MODEL = os.environ.get("CPERSONA_EMBEDDING_MODEL", "text-embedding-3-small")
 
 # Vector search threshold (cosine similarity, 0.0-1.0)
@@ -65,9 +62,7 @@ EMBEDDING_CACHE_SIZE = int(os.environ.get("CPERSONA_EMBEDDING_CACHE_SIZE", "256"
 EMBEDDING_CACHE_TTL = int(os.environ.get("CPERSONA_EMBEDDING_CACHE_TTL", "300"))  # seconds
 
 # LLM proxy configuration (for Phase 3: memory extraction)
-LLM_PROXY_URL = os.environ.get(
-    "CPERSONA_LLM_PROXY_URL", "http://127.0.0.1:8082/v1/chat/completions"
-)
+LLM_PROXY_URL = os.environ.get("CPERSONA_LLM_PROXY_URL", "http://127.0.0.1:8082/v1/chat/completions")
 LLM_PROVIDER = os.environ.get("CPERSONA_LLM_PROVIDER", "cerebras")
 LLM_MODEL = os.environ.get("CPERSONA_LLM_MODEL", "gpt-oss-120b")
 
@@ -117,7 +112,9 @@ class EmbeddingClient:
         self._client = httpx.AsyncClient(timeout=30)
         logger.info(
             "EmbeddingClient initialized (mode=%s, cache=%d, ttl=%ds)",
-            self.mode, self._cache_size, self._cache_ttl,
+            self.mode,
+            self._cache_size,
+            self._cache_ttl,
         )
 
     async def close(self):
@@ -370,7 +367,11 @@ class MemoryTaskQueue:
                 task_id, task_type, agent_id, payload, retries = task
                 logger.info(
                     "MemoryTaskQueue: processing %s (task_id=%d, agent=%s, retry=%d/%d)",
-                    task_type, task_id, agent_id, retries, TASK_MAX_RETRIES,
+                    task_type,
+                    task_id,
+                    agent_id,
+                    retries,
+                    TASK_MAX_RETRIES,
                 )
                 try:
                     if task_type == "update_profile":
@@ -396,8 +397,7 @@ class MemoryTaskQueue:
     async def _fetch_next(self) -> tuple | None:
         db = await get_db()
         rows = await db.execute_fetchall(
-            "SELECT id, task_type, agent_id, payload, retries "
-            "FROM pending_memory_tasks ORDER BY id ASC LIMIT 1"
+            "SELECT id, task_type, agent_id, payload, retries FROM pending_memory_tasks ORDER BY id ASC LIMIT 1"
         )
         if not rows:
             return None
@@ -538,9 +538,7 @@ async def get_db() -> aiosqlite.Connection:
         await _db.executescript(FTS_SQL)
 
     # Track schema version
-    row = await _db.execute_fetchall(
-        "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
-    )
+    row = await _db.execute_fetchall("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
     current = row[0][0] if row else 0
     if current < SCHEMA_VERSION:
         await _db.execute(
@@ -581,9 +579,7 @@ async def do_store(agent_id: str, message: dict) -> dict:
     msg_id = message.get("id", "")
     content = message.get("content", "")
     source = json.dumps(message.get("source", {}))
-    timestamp = message.get(
-        "timestamp", datetime.now(timezone.utc).isoformat()
-    )
+    timestamp = message.get("timestamp", datetime.now(timezone.utc).isoformat())
     metadata = json.dumps(message.get("metadata", {}))
 
     if not content:
@@ -648,19 +644,19 @@ async def do_recall(agent_id: str, query: str, limit: int) -> dict:
     )
     for (profile_content,) in profile_rows:
         # Inject profile as a system-context memory
-        results.append({
-            "id": -1,
-            "content": f"[Profile] {profile_content}",
-            "source": {"System": "profile"},
-            "timestamp": "",
-        })
+        results.append(
+            {
+                "id": -1,
+                "content": f"[Profile] {profile_content}",
+                "source": {"System": "profile"},
+                "timestamp": "",
+            }
+        )
 
     # Strategy 3: Keyword match on memories (2.2 fallback)
     remaining = max(0, limit - len(results))
     if remaining > 0:
-        memory_rows = await _search_memories_keyword(
-            db, agent_id, query, remaining
-        )
+        memory_rows = await _search_memories_keyword(db, agent_id, query, remaining)
         for row in memory_rows:
             rid = ("mem", row["id"])
             if rid not in seen_ids:
@@ -696,9 +692,7 @@ async def do_recall(agent_id: str, query: str, limit: int) -> dict:
     return {"messages": messages}
 
 
-async def _search_vector(
-    db: aiosqlite.Connection, agent_id: str, query: str, limit: int
-) -> list[dict]:
+async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, limit: int) -> list[dict]:
     """Search memories and episodes using vector cosine similarity."""
     import numpy as np
 
@@ -729,14 +723,19 @@ async def _search_vector(
                 continue  # Dimension mismatch (provider changed)
             sim = float(np.dot(query_vec, mem_vec))
             if sim >= VECTOR_MIN_SIMILARITY:
-                candidates.append((sim, {
-                    "id": mem_id,
-                    "_rid": ("mem", mem_id),
-                    "msg_id": msg_id,
-                    "content": content,
-                    "source": source,
-                    "timestamp": timestamp,
-                }))
+                candidates.append(
+                    (
+                        sim,
+                        {
+                            "id": mem_id,
+                            "_rid": ("mem", mem_id),
+                            "msg_id": msg_id,
+                            "content": content,
+                            "source": source,
+                            "timestamp": timestamp,
+                        },
+                    )
+                )
         except (ValueError, TypeError) as e:
             logger.debug("Skipping memory %s: vector decode error: %s", mem_id, e)
             continue
@@ -759,13 +758,18 @@ async def _search_vector(
                 continue
             sim = float(np.dot(query_vec, ep_vec))
             if sim >= VECTOR_MIN_SIMILARITY:
-                candidates.append((sim, {
-                    "id": ep_id,
-                    "_rid": ("ep", ep_id),
-                    "content": f"[Episode] {summary}",
-                    "source": {"System": "episode"},
-                    "timestamp": start_time or "",
-                }))
+                candidates.append(
+                    (
+                        sim,
+                        {
+                            "id": ep_id,
+                            "_rid": ("ep", ep_id),
+                            "content": f"[Episode] {summary}",
+                            "source": {"System": "episode"},
+                            "timestamp": start_time or "",
+                        },
+                    )
+                )
         except (ValueError, TypeError) as e:
             logger.debug("Skipping episode %s: vector decode error: %s", ep_id, e)
             continue
@@ -775,13 +779,11 @@ async def _search_vector(
     return [c[1] for c in candidates[:limit]]
 
 
-async def _search_episodes_fts(
-    db: aiosqlite.Connection, agent_id: str, query: str, limit: int
-) -> list[dict]:
+async def _search_episodes_fts(db: aiosqlite.Connection, agent_id: str, query: str, limit: int) -> list[dict]:
     """Search episodes using FTS5."""
     # Sanitize: strip everything except alphanumeric, CJK, and whitespace
     # to prevent FTS5 operator injection (AND/OR/NOT/NEAR/*/^/- etc.)
-    sanitized = re.sub(r'[^\w\s]', "", query, flags=re.UNICODE)
+    sanitized = re.sub(r"[^\w\s]", "", query, flags=re.UNICODE)
     words = sanitized.split()
     if not words:
         return []
@@ -811,9 +813,7 @@ async def _search_episodes_fts(
     ]
 
 
-async def _search_memories_keyword(
-    db: aiosqlite.Connection, agent_id: str, query: str, limit: int
-) -> list[dict]:
+async def _search_memories_keyword(db: aiosqlite.Connection, agent_id: str, query: str, limit: int) -> list[dict]:
     """Search memories using keyword matching (2.2-compatible fallback)."""
     if query.strip():
         # Keyword match
@@ -839,13 +839,15 @@ async def _search_memories_keyword(
 
     results = []
     for row in rows:
-        results.append({
-            "id": row[0],
-            "msg_id": row[1],
-            "content": row[2],
-            "source": row[3],
-            "timestamp": row[4],
-        })
+        results.append(
+            {
+                "id": row[0],
+                "msg_id": row[1],
+                "content": row[2],
+                "source": row[3],
+                "timestamp": row[4],
+            }
+        )
         if len(results) >= limit:
             break
 
@@ -954,13 +956,34 @@ async def do_archive_episode(agent_id: str, history: list[dict]) -> dict:
         # Fallback: word frequency
         word_freq: dict[str, int] = {}
         for msg in history:
-            for word in re.findall(r'\b\w{3,}\b', msg.get("content", "").lower()):
+            for word in re.findall(r"\b\w{3,}\b", msg.get("content", "").lower()):
                 word_freq[word] = word_freq.get(word, 0) + 1
-        stopwords = {"the", "and", "for", "that", "this", "with", "are", "was", "has", "have",
-                     "not", "but", "you", "your", "can", "will", "from", "they", "been", "more"}
+        stopwords = {
+            "the",
+            "and",
+            "for",
+            "that",
+            "this",
+            "with",
+            "are",
+            "was",
+            "has",
+            "have",
+            "not",
+            "but",
+            "you",
+            "your",
+            "can",
+            "will",
+            "from",
+            "they",
+            "been",
+            "more",
+        }
         sorted_words = sorted(
             ((w, c) for w, c in word_freq.items() if w not in stopwords),
-            key=lambda x: x[1], reverse=True,
+            key=lambda x: x[1],
+            reverse=True,
         )
         keywords = " ".join(w for w, _ in sorted_words[:10])
     else:
@@ -1048,14 +1071,16 @@ async def do_list_memories(agent_id: str, limit: int) -> dict:
             source = json.loads(row[4]) if row[4] else {}
         except (json.JSONDecodeError, TypeError):
             pass
-        memories.append({
-            "id": row[0],
-            "agent_id": row[1],
-            "content": row[3],
-            "source": source,
-            "timestamp": row[5],
-            "created_at": row[6],
-        })
+        memories.append(
+            {
+                "id": row[0],
+                "agent_id": row[1],
+                "content": row[3],
+                "source": source,
+                "timestamp": row[5],
+                "created_at": row[6],
+            }
+        )
     return {"memories": memories, "count": len(memories)}
 
 
@@ -1076,15 +1101,17 @@ async def do_list_episodes(agent_id: str, limit: int) -> dict:
         )
     episodes = []
     for row in rows:
-        episodes.append({
-            "id": row[0],
-            "agent_id": row[1],
-            "summary": row[2],
-            "keywords": row[3],
-            "start_time": row[4],
-            "end_time": row[5],
-            "created_at": row[6],
-        })
+        episodes.append(
+            {
+                "id": row[0],
+                "agent_id": row[1],
+                "summary": row[2],
+                "keywords": row[3],
+                "start_time": row[4],
+                "end_time": row[5],
+                "created_at": row[6],
+            }
+        )
     return {"episodes": episodes, "count": len(episodes)}
 
 
@@ -1119,15 +1146,9 @@ async def do_delete_agent_data(agent_id: str) -> dict:
         return {"error": "agent_id is required for bulk deletion"}
 
     db = await get_db()
-    mem_cursor = await db.execute(
-        "DELETE FROM memories WHERE agent_id = ?", (agent_id,)
-    )
-    prof_cursor = await db.execute(
-        "DELETE FROM profiles WHERE agent_id = ?", (agent_id,)
-    )
-    ep_cursor = await db.execute(
-        "DELETE FROM episodes WHERE agent_id = ?", (agent_id,)
-    )
+    mem_cursor = await db.execute("DELETE FROM memories WHERE agent_id = ?", (agent_id,))
+    prof_cursor = await db.execute("DELETE FROM profiles WHERE agent_id = ?", (agent_id,))
+    ep_cursor = await db.execute("DELETE FROM episodes WHERE agent_id = ?", (agent_id,))
     await db.commit()
 
     result = {
@@ -1168,24 +1189,40 @@ async def do_delete_episode(episode_id: int, agent_id: str = "") -> dict:
 
 # --- Tool registrations (must be after all do_* definitions) ---
 
-registry.auto_tool("store", "Store a message in agent memory for future recall.", {
-    "type": "object",
-    "properties": {
-        "agent_id": {"type": "string", "description": "Agent identifier"},
-        "message": {"type": "object", "description": "ClotoMessage to store (id, content, source, timestamp, metadata)"},
+registry.auto_tool(
+    "store",
+    "Store a message in agent memory for future recall.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent identifier"},
+            "message": {
+                "type": "object",
+                "description": "ClotoMessage to store (id, content, source, timestamp, metadata)",
+            },
+        },
+        "required": ["agent_id", "message"],
     },
-    "required": ["agent_id", "message"],
-}, do_store, [("agent_id", str), ("message", dict)])
+    do_store,
+    [("agent_id", str), ("message", dict)],
+)
 
-registry.auto_tool("recall", "Recall relevant memories using multi-strategy search (vector + FTS5 + keyword).", {
-    "type": "object",
-    "properties": {
-        "agent_id": {"type": "string", "description": "Agent identifier"},
-        "query": {"type": "string", "description": "Search query (empty returns recent memories)"},
-        "limit": {"type": "integer", "description": "Max memories to return", "default": 10},
+registry.auto_tool(
+    "recall",
+    "Recall relevant memories using multi-strategy search (vector + FTS5 + keyword).",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent identifier"},
+            "query": {"type": "string", "description": "Search query (empty returns recent memories)"},
+            "limit": {"type": "integer", "description": "Max memories to return", "default": 10},
+        },
+        "required": ["agent_id", "query"],
     },
-    "required": ["agent_id", "query"],
-}, do_recall, [("agent_id", str), ("query", str), ("limit", int, 10)])
+    do_recall,
+    [("agent_id", str), ("query", str), ("limit", int, 10)],
+)
+
 
 async def do_update_profile_or_queue(agent_id: str, history: list) -> dict:
     """Enqueue profile update if task queue is enabled, otherwise run synchronously."""
@@ -1210,72 +1247,124 @@ async def do_get_queue_status() -> dict:
     return {"enabled": False, "pending": 0}
 
 
-registry.auto_tool("update_profile", "Extract user facts from conversation and merge with existing profile.", {
-    "type": "object",
-    "properties": {
-        "agent_id": {"type": "string", "description": "Agent identifier"},
-        "history": {"type": "array", "description": "Recent conversation messages", "items": {"type": "object"}},
+registry.auto_tool(
+    "update_profile",
+    "Extract user facts from conversation and merge with existing profile.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent identifier"},
+            "history": {"type": "array", "description": "Recent conversation messages", "items": {"type": "object"}},
+        },
+        "required": ["agent_id", "history"],
     },
-    "required": ["agent_id", "history"],
-}, do_update_profile_or_queue, [("agent_id", str), ("history", list)])
+    do_update_profile_or_queue,
+    [("agent_id", str), ("history", list)],
+)
 
-registry.auto_tool("archive_episode", "Summarize and archive a conversation episode for searchable recall.", {
-    "type": "object",
-    "properties": {
-        "agent_id": {"type": "string", "description": "Agent identifier"},
-        "history": {"type": "array", "description": "Conversation messages to archive", "items": {"type": "object"}},
+registry.auto_tool(
+    "archive_episode",
+    "Summarize and archive a conversation episode for searchable recall.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent identifier"},
+            "history": {
+                "type": "array",
+                "description": "Conversation messages to archive",
+                "items": {"type": "object"},
+            },
+        },
+        "required": ["agent_id", "history"],
     },
-    "required": ["agent_id", "history"],
-}, do_archive_episode_or_queue, [("agent_id", str), ("history", list)])
+    do_archive_episode_or_queue,
+    [("agent_id", str), ("history", list)],
+)
 
-registry.auto_tool("list_memories", "List recent memories for an agent (for dashboard display).", {
-    "type": "object",
-    "properties": {
-        "agent_id": {"type": "string", "description": "Agent identifier (empty for all agents)"},
-        "limit": {"type": "integer", "description": "Max memories to return", "default": 100},
+registry.auto_tool(
+    "list_memories",
+    "List recent memories for an agent (for dashboard display).",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent identifier (empty for all agents)"},
+            "limit": {"type": "integer", "description": "Max memories to return", "default": 100},
+        },
+        "required": [],
     },
-    "required": [],
-}, do_list_memories, [("agent_id", str), ("limit", int, 100)])
+    do_list_memories,
+    [("agent_id", str), ("limit", int, 100)],
+)
 
-registry.auto_tool("list_episodes", "List archived episodes for an agent (for dashboard display).", {
-    "type": "object",
-    "properties": {
-        "agent_id": {"type": "string", "description": "Agent identifier (empty for all agents)"},
-        "limit": {"type": "integer", "description": "Max episodes to return", "default": 50},
+registry.auto_tool(
+    "list_episodes",
+    "List archived episodes for an agent (for dashboard display).",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent identifier (empty for all agents)"},
+            "limit": {"type": "integer", "description": "Max episodes to return", "default": 50},
+        },
+        "required": [],
     },
-    "required": [],
-}, do_list_episodes, [("agent_id", str), ("limit", int, 50)])
+    do_list_episodes,
+    [("agent_id", str), ("limit", int, 50)],
+)
 
-registry.auto_tool("delete_agent_data", "Delete ALL data (memories, profiles, episodes) for a specific agent. Used by kernel during agent deletion.", {
-    "type": "object",
-    "properties": {
-        "agent_id": {"type": "string", "description": "Agent ID whose data should be purged"},
+registry.auto_tool(
+    "delete_agent_data",
+    "Delete ALL data (memories, profiles, episodes) for a specific agent. Used by kernel during agent deletion.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent ID whose data should be purged"},
+        },
+        "required": ["agent_id"],
     },
-    "required": ["agent_id"],
-}, do_delete_agent_data, [("agent_id", str)])
+    do_delete_agent_data,
+    [("agent_id", str)],
+)
 
-registry.auto_tool("delete_memory", "Delete a single memory by ID. Ownership is enforced when agent_id is provided.", {
-    "type": "object",
-    "properties": {
-        "agent_id": {"type": "string", "description": "Agent ID for ownership verification (injected by kernel)"},
-        "memory_id": {"type": "integer", "description": "Memory ID to delete"},
+registry.auto_tool(
+    "delete_memory",
+    "Delete a single memory by ID. Ownership is enforced when agent_id is provided.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent ID for ownership verification (injected by kernel)"},
+            "memory_id": {"type": "integer", "description": "Memory ID to delete"},
+        },
+        "required": ["memory_id"],
     },
-    "required": ["memory_id"],
-}, do_delete_memory, [("memory_id", int), ("agent_id", str)])
+    do_delete_memory,
+    [("memory_id", int), ("agent_id", str)],
+)
 
-registry.auto_tool("delete_episode", "Delete a single episode by ID. Ownership is enforced when agent_id is provided.", {
-    "type": "object",
-    "properties": {
-        "agent_id": {"type": "string", "description": "Agent ID for ownership verification (injected by kernel)"},
-        "episode_id": {"type": "integer", "description": "Episode ID to delete"},
+registry.auto_tool(
+    "delete_episode",
+    "Delete a single episode by ID. Ownership is enforced when agent_id is provided.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent ID for ownership verification (injected by kernel)"},
+            "episode_id": {"type": "integer", "description": "Episode ID to delete"},
+        },
+        "required": ["episode_id"],
     },
-    "required": ["episode_id"],
-}, do_delete_episode, [("episode_id", int), ("agent_id", str)])
+    do_delete_episode,
+    [("episode_id", int), ("agent_id", str)],
+)
 
-registry.auto_tool("get_queue_status", "Get the status of the background task queue (pending tasks, retry config).", {
-    "type": "object",
-    "properties": {},
-}, do_get_queue_status, [])
+registry.auto_tool(
+    "get_queue_status",
+    "Get the status of the background task queue (pending tasks, retry config).",
+    {
+        "type": "object",
+        "properties": {},
+    },
+    do_get_queue_status,
+    [],
+)
 
 
 async def main():
@@ -1312,9 +1401,7 @@ async def main():
 
     try:
         async with stdio_server() as (read_stream, write_stream):
-            await registry.server.run(
-                read_stream, write_stream, registry.server.create_initialization_options()
-            )
+            await registry.server.run(read_stream, write_stream, registry.server.create_initialization_options())
     finally:
         if _task_queue:
             await _task_queue.stop()

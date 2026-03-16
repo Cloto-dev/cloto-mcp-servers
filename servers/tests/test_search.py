@@ -1,22 +1,19 @@
 """Tests for common.search module."""
 
-import asyncio
 import os
 import sys
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
 from common.search import (
+    ChainProvider,
     SearchProvider,
     SearXNGProvider,
     TavilyProvider,
-    DuckDuckGoProvider,
-    ChainProvider,
 )
-
 
 # ============================================================
 # SearXNGProvider
@@ -119,7 +116,9 @@ async def test_chain_provider_all_fail():
 def _reload_and_create():
     """Reload search module to pick up env changes, return (provider, module)."""
     import importlib
+
     import common.search as search_mod
+
     importlib.reload(search_mod)
     return search_mod.create_search_provider(), search_mod
 

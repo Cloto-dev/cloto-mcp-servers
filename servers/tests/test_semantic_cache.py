@@ -4,7 +4,6 @@ Uses a mock embedding server that returns deterministic normalized vectors.
 """
 
 import asyncio
-import time
 
 import pytest
 
@@ -69,6 +68,7 @@ def _create_cache(mock: MockEmbeddingClient, **kwargs) -> SemanticCache:
 # Unit tests: _dot_product
 # ---------------------------------------------------------------------------
 
+
 def test_dot_product_identical():
     vec = [0.5, 0.5, 0.5, 0.5]
     assert abs(_dot_product(vec, vec) - 1.0) < 0.01
@@ -83,6 +83,7 @@ def test_dot_product_orthogonal():
 # ---------------------------------------------------------------------------
 # Phase 3: Semantic cache behavior
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_cache_miss_on_empty():
@@ -214,6 +215,7 @@ async def test_embedding_failure_graceful():
             pass
 
     import httpx  # noqa: F811
+
     cache = SemanticCache()
     cache._client = FailingClient()
 

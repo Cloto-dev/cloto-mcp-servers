@@ -10,7 +10,6 @@ Tools:
 """
 
 import asyncio
-import json
 import os
 import sys
 
@@ -20,7 +19,7 @@ import httpx
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.normpath(os.path.join(_script_dir, "..")))
 
-from common.llm_provider import build_system_prompt, build_chat_messages
+from common.llm_provider import build_chat_messages
 from common.mcp_utils import ToolRegistry, run_mcp_server
 from common.validation import validate_dict, validate_list
 
@@ -58,9 +57,7 @@ def parse_chat_content(response_data: dict) -> str:
     try:
         return response_data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
-        raise ValueError(
-            f"Invalid Ollama API response: {e}"
-        ) from e
+        raise ValueError(f"Invalid Ollama API response: {e}") from e
 
 
 # ============================================================
@@ -92,10 +89,7 @@ async def call_ollama_api(messages: list[dict]) -> dict:
             headers={"Content-Type": "application/json"},
         )
         if response.status_code == 404:
-            raise ValueError(
-                f"Model '{model}' not found in Ollama. "
-                f"Install it with: ollama pull {model}"
-            )
+            raise ValueError(f"Model '{model}' not found in Ollama. Install it with: ollama pull {model}")
         response.raise_for_status()
         return response.json()
 
@@ -118,8 +112,7 @@ registry = ToolRegistry("cloto-mcp-ollama")
 
 @registry.tool(
     "think",
-    "Generate a text response using a local Ollama model. "
-    "No API key required — runs entirely on local hardware.",
+    "Generate a text response using a local Ollama model. No API key required — runs entirely on local hardware.",
     {
         "type": "object",
         "properties": {
@@ -142,10 +135,7 @@ async def handle_think(arguments: dict) -> dict:
 
         return {"type": "final", "content": content}
     except httpx.ConnectError:
-        return {
-            "error": f"Cannot connect to Ollama at {BASE_URL}. "
-                     f"Is Ollama running? Start it with: ollama serve"
-        }
+        return {"error": f"Cannot connect to Ollama at {BASE_URL}. Is Ollama running? Start it with: ollama serve"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -162,34 +152,35 @@ async def handle_list_models(arguments: dict) -> dict:
         models = await fetch_ollama_models()
         result = []
         for m in models:
-            size_gb = m.get("size", 0) / (1024 ** 3)
-            result.append({
-                "name": m.get("name", ""),
-                "size": f"{size_gb:.1f}GB",
-                "modified_at": m.get("modified_at", ""),
-                "family": m.get("details", {}).get("family", ""),
-                "parameter_size": m.get("details", {}).get("parameter_size", ""),
-                "quantization": m.get("details", {}).get("quantization_level", ""),
-            })
+            size_gb = m.get("size", 0) / (1024**3)
+            result.append(
+                {
+                    "name": m.get("name", ""),
+                    "size": f"{size_gb:.1f}GB",
+                    "modified_at": m.get("modified_at", ""),
+                    "family": m.get("details", {}).get("family", ""),
+                    "parameter_size": m.get("details", {}).get("parameter_size", ""),
+                    "quantization": m.get("details", {}).get("quantization_level", ""),
+                }
+            )
 
         return {"active_model": active, "models": result, "count": len(result)}
     except httpx.ConnectError:
-        return {
-            "error": f"Cannot connect to Ollama at {BASE_URL}. "
-                     f"Is Ollama running? Start it with: ollama serve"
-        }
+        return {"error": f"Cannot connect to Ollama at {BASE_URL}. Is Ollama running? Start it with: ollama serve"}
     except Exception as e:
         return {"error": str(e)}
 
 
 @registry.tool(
     "switch_model",
-    "Switch the active Ollama model for this session. "
-    "The model must be locally installed (use list_models to check).",
+    "Switch the active Ollama model for this session. The model must be locally installed (use list_models to check).",
     {
         "type": "object",
         "properties": {
-            "model": {"type": "string", "description": "Model name to switch to (e.g., 'llama3.1', 'mistral', 'qwen2.5')"},
+            "model": {
+                "type": "string",
+                "description": "Model name to switch to (e.g., 'llama3.1', 'mistral', 'qwen2.5')",
+            },
         },
         "required": ["model"],
     },
@@ -204,10 +195,7 @@ async def handle_switch_model(arguments: dict) -> dict:
     try:
         models = await fetch_ollama_models()
         available_names = [m.get("name", "") for m in models]
-        found = any(
-            model == name or model == name.split(":")[0]
-            for name in available_names
-        )
+        found = any(model == name or model == name.split(":")[0] for name in available_names)
 
         if not found:
             return {
@@ -226,10 +214,7 @@ async def handle_switch_model(arguments: dict) -> dict:
             "active_model": model,
         }
     except httpx.ConnectError:
-        return {
-            "error": f"Cannot connect to Ollama at {BASE_URL}. "
-                     f"Is Ollama running? Start it with: ollama serve"
-        }
+        return {"error": f"Cannot connect to Ollama at {BASE_URL}. Is Ollama running? Start it with: ollama serve"}
     except Exception as e:
         return {"error": str(e)}
 

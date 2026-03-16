@@ -40,18 +40,14 @@ def _headers() -> dict[str, str]:
 
 async def _api_get(path: str, params: dict | None = None) -> dict:
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(
-            f"{API_BASE}{path}", headers=_headers(), params=params
-        )
+        resp = await client.get(f"{API_BASE}{path}", headers=_headers(), params=params)
         resp.raise_for_status()
         return resp.json()
 
 
 async def _api_post(path: str, payload: dict | None = None) -> dict:
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.post(
-            f"{API_BASE}{path}", headers=_headers(), json=payload or {}
-        )
+        resp = await client.post(f"{API_BASE}{path}", headers=_headers(), json=payload or {})
         resp.raise_for_status()
         return resp.json()
 
@@ -65,6 +61,7 @@ async def _api_delete(path: str) -> dict:
 
 def _wrap_http_error(fn):
     """Decorator to catch httpx.HTTPStatusError and return error dict."""
+
     async def wrapper(arguments: dict) -> dict:
         try:
             return await fn(arguments)
@@ -75,6 +72,7 @@ def _wrap_http_error(fn):
             except Exception:
                 pass
             return {"error": f"API {e.response.status_code}: {body}"}
+
     wrapper.__name__ = fn.__name__
     return wrapper
 
@@ -162,9 +160,7 @@ registry = ToolRegistry("cloto-mcp-cron")
             },
             "creator_user_name": {
                 "type": "string",
-                "description": (
-                    "User display name for 'user' source type. Required when source_type='user'."
-                ),
+                "description": ("User display name for 'user' source type. Required when source_type='user'."),
             },
         },
         "required": ["agent_id", "name", "schedule_type", "schedule_value", "message"],

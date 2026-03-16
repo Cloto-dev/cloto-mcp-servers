@@ -8,7 +8,6 @@ import asyncio
 import time
 
 import pytest
-
 from cpersona.server import EmbeddingClient
 
 # ---------------------------------------------------------------------------
@@ -59,6 +58,7 @@ class MockResponse:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _create_client(mock: MockEmbeddingTransport) -> EmbeddingClient:
     """Create an EmbeddingClient with injected mock transport."""
     client = EmbeddingClient(
@@ -76,6 +76,7 @@ def _measure_ms(start: float) -> float:
 # ---------------------------------------------------------------------------
 # Phase 1: Baseline benchmarks (no cache)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_baseline_single_embed():
@@ -108,9 +109,7 @@ async def test_cached_repeated_identical_queries():
         await client.embed([query])
         times.append(_measure_ms(start))
 
-    assert mock.call_count == 1, (
-        f"Expected 1 HTTP call with cache, got {mock.call_count}"
-    )
+    assert mock.call_count == 1, f"Expected 1 HTTP call with cache, got {mock.call_count}"
     assert client.cache_hits == n_repeats - 1
     assert client.cache_misses == 1
 
@@ -163,7 +162,7 @@ async def test_baseline_batch_vs_single():
 
     # Batch
     start = time.perf_counter()
-    batch_result = await client_batch.embed(texts)
+    await client_batch.embed(texts)
     batch_time = _measure_ms(start)
 
     # Single
@@ -185,12 +184,14 @@ async def test_baseline_batch_vs_single():
 # Phase 2: Cache behavior tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_cache_ttl_expiry():
     """Expired entries should be evicted and re-fetched."""
     mock = MockEmbeddingTransport(latency_ms=10)
-    client = EmbeddingClient(mode="http", http_url="http://localhost/embed",
-                             cache_size=256, cache_ttl=0)  # TTL=0 → immediate expiry
+    client = EmbeddingClient(
+        mode="http", http_url="http://localhost/embed", cache_size=256, cache_ttl=0
+    )  # TTL=0 → immediate expiry
     client._client = mock
 
     await client.embed(["ttl test"])
@@ -205,8 +206,7 @@ async def test_cache_ttl_expiry():
 async def test_cache_lru_eviction():
     """When cache is full, oldest entries should be evicted."""
     mock = MockEmbeddingTransport(latency_ms=1)
-    client = EmbeddingClient(mode="http", http_url="http://localhost/embed",
-                             cache_size=3, cache_ttl=300)
+    client = EmbeddingClient(mode="http", http_url="http://localhost/embed", cache_size=3, cache_ttl=300)
     client._client = mock
 
     # Fill cache with 3 entries: [a, b, c]

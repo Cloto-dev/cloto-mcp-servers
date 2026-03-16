@@ -7,7 +7,6 @@ Design: docs/CPERSONA_MEMORY_DESIGN.md Section 5
 """
 
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -33,9 +32,7 @@ EMBEDDING_HTTP_PORT = int(os.environ.get("EMBEDDING_HTTP_PORT", "8401"))
 if not (1 <= EMBEDDING_HTTP_PORT <= 65535):
     raise ValueError(f"EMBEDDING_HTTP_PORT must be 1-65535, got {EMBEDDING_HTTP_PORT}")
 EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "")
-EMBEDDING_API_URL = os.environ.get(
-    "EMBEDDING_API_URL", "https://api.openai.com/v1/embeddings"
-)
+EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL", "https://api.openai.com/v1/embeddings")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "")  # provider-dependent default
 EMBEDDING_TIMEOUT = int(os.environ.get("EMBEDDING_TIMEOUT_SECS", "30"))
 
@@ -92,13 +89,12 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
     async def initialize(self) -> None:
         if not self._api_key:
-            raise ValueError(
-                "EMBEDDING_API_KEY is required for api_openai provider"
-            )
+            raise ValueError("EMBEDDING_API_KEY is required for api_openai provider")
         self._client = httpx.AsyncClient(timeout=self._timeout)
         logger.info(
             "OpenAI embedding provider initialized (model=%s, url=%s)",
-            self._model, self._api_url,
+            self._model,
+            self._api_url,
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -174,10 +170,9 @@ class OnnxMiniLMProvider(EmbeddingProvider):
             logger.info("ONNX model not found, downloading automatically...")
             try:
                 from download_model import download
+
                 if not download():
-                    raise FileNotFoundError(
-                        f"Failed to download ONNX model to {self._model_dir}"
-                    )
+                    raise FileNotFoundError(f"Failed to download ONNX model to {self._model_dir}")
             except ImportError:
                 raise FileNotFoundError(
                     f"ONNX model not found at {model_path}. "
@@ -202,7 +197,8 @@ class OnnxMiniLMProvider(EmbeddingProvider):
 
         logger.info(
             "ONNX MiniLM provider initialized (dir=%s, providers=%s)",
-            self._model_dir, providers,
+            self._model_dir,
+            providers,
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -210,23 +206,15 @@ class OnnxMiniLMProvider(EmbeddingProvider):
             raise RuntimeError("Provider not initialized")
 
         async with self._lock:
-            return await asyncio.get_event_loop().run_in_executor(
-                None, self._embed_sync, texts
-            )
+            return await asyncio.get_event_loop().run_in_executor(None, self._embed_sync, texts)
 
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:
         """Synchronous embedding (run in executor to avoid blocking)."""
         encodings = self._tokenizer.encode_batch(texts)
 
-        input_ids = np.array(
-            [e.ids for e in encodings], dtype=np.int64
-        )
-        attention_mask = np.array(
-            [e.attention_mask for e in encodings], dtype=np.int64
-        )
-        token_type_ids = np.array(
-            [e.type_ids for e in encodings], dtype=np.int64
-        )
+        input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
+        attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
+        token_type_ids = np.array([e.type_ids for e in encodings], dtype=np.int64)
 
         outputs = self._session.run(
             None,
@@ -240,12 +228,8 @@ class OnnxMiniLMProvider(EmbeddingProvider):
 
         # Mean pooling + L2 normalization
         mask_expanded = np.expand_dims(attention_mask, -1).astype(np.float32)
-        sum_embeddings = np.sum(
-            token_embeddings * mask_expanded, axis=1
-        )
-        sum_mask = np.clip(
-            np.sum(mask_expanded, axis=1), a_min=1e-9, a_max=None
-        )
+        sum_embeddings = np.sum(token_embeddings * mask_expanded, axis=1)
+        sum_mask = np.clip(np.sum(mask_expanded, axis=1), a_min=1e-9, a_max=None)
         mean_pooled = sum_embeddings / sum_mask
 
         norms = np.linalg.norm(mean_pooled, axis=1, keepdims=True)
@@ -279,10 +263,7 @@ def create_provider() -> EmbeddingProvider:
     elif EMBEDDING_PROVIDER == "onnx_miniml":
         return OnnxMiniLMProvider(model_dir=ONNX_MODEL_DIR)
     else:
-        raise ValueError(
-            f"Unknown embedding provider: {EMBEDDING_PROVIDER}. "
-            f"Supported: api_openai, onnx_miniml"
-        )
+        raise ValueError(f"Unknown embedding provider: {EMBEDDING_PROVIDER}. Supported: api_openai, onnx_miniml")
 
 
 # ============================================================
@@ -295,16 +276,12 @@ _provider: EmbeddingProvider | None = None
 async def handle_embed(request: web.Request) -> web.Response:
     """POST /embed — Generate embeddings for input texts."""
     if _provider is None:
-        return web.json_response(
-            {"error": "Provider not initialized"}, status=503
-        )
+        return web.json_response({"error": "Provider not initialized"}, status=503)
 
     try:
         body = await request.json()
     except Exception:
-        return web.json_response(
-            {"error": "Invalid JSON body"}, status=400
-        )
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
 
     texts = body.get("texts")
     if not isinstance(texts, list) or not texts:
@@ -315,21 +292,19 @@ async def handle_embed(request: web.Request) -> web.Response:
 
     # Limit batch size to prevent OOM
     if len(texts) > 100:
-        return web.json_response(
-            {"error": "Batch size exceeds limit (max 100)"}, status=400
-        )
+        return web.json_response({"error": "Batch size exceeds limit (max 100)"}, status=400)
 
     try:
         embeddings = await _provider.embed(texts)
-        return web.json_response({
-            "embeddings": embeddings,
-            "dimensions": _provider.dimensions(),
-        })
+        return web.json_response(
+            {
+                "embeddings": embeddings,
+                "dimensions": _provider.dimensions(),
+            }
+        )
     except Exception as e:
         logger.exception("Embedding failed")
-        return web.json_response(
-            {"error": f"Embedding failed: {e}"}, status=500
-        )
+        return web.json_response({"error": f"Embedding failed: {e}"}, status=500)
 
 
 async def run_http_server(port: int) -> None:
@@ -408,7 +383,8 @@ async def main():
 
     logger.info(
         "Starting embedding server (provider=%s, http_port=%d)",
-        EMBEDDING_PROVIDER, EMBEDDING_HTTP_PORT,
+        EMBEDDING_PROVIDER,
+        EMBEDDING_HTTP_PORT,
     )
 
     _provider = create_provider()

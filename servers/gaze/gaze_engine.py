@@ -8,11 +8,10 @@ MCP tool handlers read the latest gaze result from shared state.
 import math
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import cv2
 import mediapipe as mp
-import numpy as np
 
 # ============================================================
 # Constants
@@ -45,14 +44,14 @@ ONE_EURO_DCUTOFF = 1.0
 
 # MediaPipe model URL
 FACE_MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/"
-    "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 )
 
 
 # ============================================================
 # One Euro Filter (Casiez et al., CHI 2012)
 # ============================================================
+
 
 class _LowPassFilter:
     __slots__ = ("_s", "_raw", "_initialized")
@@ -81,8 +80,7 @@ class _LowPassFilter:
 
 
 class OneEuroFilter:
-    __slots__ = ("_freq", "_mincutoff", "_beta", "_dcutoff",
-                 "_x_filt", "_dx_filt", "_last_time")
+    __slots__ = ("_freq", "_mincutoff", "_beta", "_dcutoff", "_x_filt", "_dx_filt", "_last_time")
 
     def __init__(
         self,
@@ -111,11 +109,7 @@ class OneEuroFilter:
                 self._freq = 1.0 / dt
         self._last_time = timestamp
 
-        dvalue = (
-            (value - self._x_filt.last_raw) * self._freq
-            if self._x_filt.has_last_raw
-            else 0.0
-        )
+        dvalue = (value - self._x_filt.last_raw) * self._freq if self._x_filt.has_last_raw else 0.0
         edvalue = self._dx_filt.filter(dvalue, self._alpha(self._dcutoff))
         cutoff = self._mincutoff + self._beta * abs(edvalue)
         return self._x_filt.filter(value, self._alpha(cutoff))
@@ -125,11 +119,13 @@ class OneEuroFilter:
 # Gaze Result
 # ============================================================
 
+
 @dataclass
 class GazeResult:
     """Normalized gaze coordinates. No screen mapping — consumers decide."""
-    gaze_x: float = 0.5       # [0,1] horizontal (0=left, 1=right)
-    gaze_y: float = 0.5       # [0,1] vertical (0=up, 1=down)
+
+    gaze_x: float = 0.5  # [0,1] horizontal (0=left, 1=right)
+    gaze_y: float = 0.5  # [0,1] vertical (0=up, 1=down)
     face_detected: bool = False
     confidence: float = 0.0
     timestamp: float = 0.0
@@ -138,6 +134,7 @@ class GazeResult:
 # ============================================================
 # Gaze Engine
 # ============================================================
+
 
 def _safe_ratio(numerator: float, denominator: float, fallback: float = 0.5) -> float:
     if abs(denominator) < ZERO_DIVISION_EPSILON:
@@ -363,6 +360,7 @@ class GazeEngine:
         except Exception as e:
             # bug-119: propagate error to caller via shared state
             import sys
+
             err_msg = f"GazeEngine error: {e}"
             print(err_msg, file=sys.stderr)
             with self._lock:
@@ -378,12 +376,14 @@ class GazeEngine:
     @staticmethod
     def _download_model() -> bytes:
         """Download MediaPipe FaceLandmarker model with retry and timeout."""
-        import urllib.request
         import sys
+        import urllib.request
 
         for attempt in range(1, MODEL_DOWNLOAD_RETRIES + 1):
             try:
-                print(f"Downloading FaceLandmarker model (attempt {attempt}/{MODEL_DOWNLOAD_RETRIES})...", file=sys.stderr)
+                print(
+                    f"Downloading FaceLandmarker model (attempt {attempt}/{MODEL_DOWNLOAD_RETRIES})...", file=sys.stderr
+                )
                 req = urllib.request.Request(FACE_MODEL_URL)
                 with urllib.request.urlopen(req, timeout=MODEL_DOWNLOAD_TIMEOUT) as resp:
                     data = resp.read()

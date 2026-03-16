@@ -10,7 +10,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from common.validation import validate_str, validate_int, validate_dict, validate_list
+from common.validation import validate_dict, validate_int, validate_list, validate_str
 
 _VALIDATORS: dict[type, Callable] = {
     str: validate_str,
@@ -35,20 +35,22 @@ class ToolRegistry:
         The decorated function receives (arguments: dict) and returns a dict.
         JSON serialization and TextContent wrapping are handled automatically.
         """
+
         def decorator(fn):
             self._tools.append(Tool(name=name, description=description, inputSchema=schema))
             self._handlers[name] = fn
             return fn
+
         return decorator
 
-    def auto_tool(self, name: str, description: str, schema: dict,
-                  handler: Callable, params: list[tuple]):
+    def auto_tool(self, name: str, description: str, schema: dict, handler: Callable, params: list[tuple]):
         """Register a tool with auto-validated parameter extraction.
 
         Each entry in *params* is ``(key, type)`` or ``(key, type, default)``.
         Supported types: ``str``, ``int``, ``dict``, ``list``.
         The extracted values are passed positionally to *handler*.
         """
+
         async def _handler(arguments: dict) -> dict:
             args = []
             for spec in params:

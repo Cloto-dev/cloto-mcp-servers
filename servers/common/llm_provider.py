@@ -21,7 +21,6 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent
 
-
 # ============================================================
 # Provider Configuration
 # ============================================================
@@ -35,9 +34,9 @@ def _detect_host_os() -> str:
       "Linux 6.5.0-44 (Ubuntu 24.04), shell: bash"
       "Darwin 23.5.0 (macOS 14.5), shell: zsh"
     """
-    system = platform.system()       # Windows / Linux / Darwin
-    release = platform.release()     # 10.0.26200 / 6.5.0-44 / 23.5.0
-    version = platform.version()     # full version string
+    system = platform.system()  # Windows / Linux / Darwin
+    release = platform.release()  # 10.0.26200 / 6.5.0-44 / 23.5.0
+    version = platform.version()  # full version string
 
     if system == "Windows":
         # platform.release() returns "11" on modern Python/Win11, or "10" on older.
@@ -119,9 +118,7 @@ def model_supports_tools(config: ProviderConfig) -> bool:
     return "reasoner" not in config.model_id
 
 
-def build_system_prompt(
-    agent: dict, tools: list[dict] | None = None
-) -> str:
+def build_system_prompt(agent: dict, tools: list[dict] | None = None) -> str:
     """Build a 5-layer system prompt for a Cloto agent.
 
     Layers:
@@ -171,9 +168,7 @@ def build_system_prompt(
 
     # --- [4] Capabilities ---
     if metadata.get("preferred_memory"):
-        lines.append(
-            "You have persistent memory — you can store and recall past conversations."
-        )
+        lines.append("You have persistent memory — you can store and recall past conversations.")
 
     avatar_desc = metadata.get("avatar_description", "")
     if avatar_desc:
@@ -201,9 +196,7 @@ def build_system_prompt(
         "prefer calling the appropriate tool over guessing or explaining "
         "how to do it manually. Execute first, explain after."
     )
-    lines.append(
-        "If no tool can help, respond honestly based on your knowledge."
-    )
+    lines.append("If no tool can help, respond honestly based on your knowledge.")
     lines.append(
         "Never state the current time, date, or day of the week without first "
         "verifying it by calling get_current_time. Recalled memories may contain "
@@ -214,8 +207,7 @@ def build_system_prompt(
         "deep_research, transcribe, analyze_image) when the user explicitly requests them."
     )
     lines.append(
-        "Do not call update_profile or archive_episode — "
-        "the system handles these automatically in the background."
+        "Do not call update_profile or archive_episode — the system handles these automatically in the background."
     )
 
     if description:
@@ -239,13 +231,15 @@ def build_chat_messages(
     messages = [{"role": "system", "content": build_system_prompt(agent, tools)}]
 
     if context:
-        messages.append({
-            "role": "system",
-            "content": (
-                "[The following are recalled memories from past conversations. "
-                "They are NOT recent messages. Time references in them may be outdated.]"
-            ),
-        })
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "[The following are recalled memories from past conversations. "
+                    "They are NOT recent messages. Time references in them may be outdated.]"
+                ),
+            }
+        )
 
     for msg in context:
         source = msg.get("source", {})
@@ -266,10 +260,12 @@ def build_chat_messages(
         messages.append({"role": role, "content": content})
 
     if context:
-        messages.append({
-            "role": "system",
-            "content": "[End of recalled memories. Current conversation follows.]",
-        })
+        messages.append(
+            {
+                "role": "system",
+                "content": "[End of recalled memories. Current conversation follows.]",
+            }
+        )
 
     # Extract user name from source for multi-user awareness
     source = message.get("source", {})
@@ -305,9 +301,7 @@ def parse_chat_content(config: ProviderConfig, response_data: dict) -> str:
     try:
         return response_data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
-        raise ValueError(
-            f"Invalid {label} API response: missing choices[0].message.content: {e}"
-        ) from e
+        raise ValueError(f"Invalid {config.display_name} API response: missing choices[0].message.content: {e}") from e
 
 
 def parse_chat_think_result(config: ProviderConfig, response_data: dict) -> dict:
@@ -344,9 +338,7 @@ def parse_chat_think_result(config: ProviderConfig, response_data: dict) -> dict
                 arguments = {}
 
             if tc_id and name:
-                calls.append(
-                    {"id": tc_id, "name": name, "arguments": arguments}
-                )
+                calls.append({"id": tc_id, "name": name, "arguments": arguments})
 
         if calls:
             # Prefer content, fall back to reasoning_content (DeepSeek R1 etc.)
@@ -446,7 +438,7 @@ async def call_llm_api(
             )
     except httpx.ConnectError:
         raise LlmApiError(
-            f"Cannot connect to LLM proxy. Ensure the kernel is running.",
+            "Cannot connect to LLM proxy. Ensure the kernel is running.",
             "connection_failed",
         )
     except httpx.TimeoutException:
@@ -539,17 +531,31 @@ THINK_WITH_TOOLS_INPUT_SCHEMA = {
 def _error_response(error: Exception) -> list[TextContent]:
     """Build a structured error response for tool handlers."""
     if isinstance(error, LlmApiError):
-        return [TextContent(type="text", text=json.dumps({
-            "error": error.message, "error_code": error.code,
-        }))]
-    return [TextContent(type="text", text=json.dumps({
-        "error": "An unexpected error occurred", "error_code": "internal",
-    }))]
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "error": error.message,
+                        "error_code": error.code,
+                    }
+                ),
+            )
+        ]
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps(
+                {
+                    "error": "An unexpected error occurred",
+                    "error_code": "internal",
+                }
+            ),
+        )
+    ]
 
 
-async def handle_think(
-    config: ProviderConfig, arguments: dict
-) -> list[TextContent]:
+async def handle_think(config: ProviderConfig, arguments: dict) -> list[TextContent]:
     """Handle 'think' tool: simple text generation."""
     try:
         agent = arguments.get("agent", {})
@@ -560,18 +566,12 @@ async def handle_think(
         response_data = await call_llm_api(config, messages)
         content = parse_chat_content(config, response_data)
 
-        return [
-            TextContent(
-                type="text", text=json.dumps({"type": "final", "content": content})
-            )
-        ]
+        return [TextContent(type="text", text=json.dumps({"type": "final", "content": content}))]
     except Exception as e:
         return _error_response(e)
 
 
-async def handle_think_with_tools(
-    config: ProviderConfig, arguments: dict
-) -> list[TextContent]:
+async def handle_think_with_tools(config: ProviderConfig, arguments: dict) -> list[TextContent]:
     """Handle 'think_with_tools' tool: may return tool calls or final text."""
     try:
         agent = arguments.get("agent", {})
@@ -614,9 +614,7 @@ async def handle_think_with_tools(
 async def run_server(server: Server):
     """Run an MCP server using stdio transport."""
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream, write_stream, server.create_initialization_options()
-        )
+        await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 # ============================================================
@@ -650,11 +648,7 @@ def load_llm_provider_config(
     # CLOTO_LLM_PROXY is injected by the kernel when NetworkScope::ProxyOnly.
     # Use it as the default API base if present.
     proxy_base = os.environ.get("CLOTO_LLM_PROXY")
-    default_api_url = (
-        f"{proxy_base}/v1/chat/completions"
-        if proxy_base
-        else "http://127.0.0.1:8082/v1/chat/completions"
-    )
+    default_api_url = f"{proxy_base}/v1/chat/completions" if proxy_base else "http://127.0.0.1:8082/v1/chat/completions"
 
     api_url = os.environ.get(f"{prefix}_API_URL", default_api_url)
 
@@ -664,16 +658,16 @@ def load_llm_provider_config(
             "CLOTO_LLM_PROXY is set (%s) but %s_API_URL (%s) does not point to "
             "localhost. In proxy-only isolation, direct external API calls may be "
             "blocked. Consider removing the custom API URL override.",
-            proxy_base, prefix, api_url,
+            proxy_base,
+            prefix,
+            api_url,
         )
 
     return ProviderConfig(
         provider_id=os.environ.get(f"{prefix}_PROVIDER", prefix.lower()),
         model_id=os.environ.get(f"{prefix}_MODEL", default_model),
         api_url=api_url,
-        request_timeout=int(
-            os.environ.get(f"{prefix}_TIMEOUT_SECS", str(default_timeout))
-        ),
+        request_timeout=int(os.environ.get(f"{prefix}_TIMEOUT_SECS", str(default_timeout))),
         supports_tools=supports_tools,
         display_name=display_name,
     )
@@ -698,9 +692,7 @@ def create_llm_mcp_server(config: ProviderConfig) -> Server:
         tools = [
             Tool(
                 name="think",
-                description=(
-                    f"Generate a text response using {config.display_name} LLM."
-                ),
+                description=(f"Generate a text response using {config.display_name} LLM."),
                 inputSchema=THINK_INPUT_SCHEMA,
             ),
         ]

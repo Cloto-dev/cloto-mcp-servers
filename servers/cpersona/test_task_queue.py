@@ -55,9 +55,7 @@ async def test_pending_memory_tasks_table_exists():
 async def test_schema_version_is_2():
     """Schema version should be 2 after Phase 5 migration."""
     db = await server.get_db()
-    rows = await db.execute_fetchall(
-        "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
-    )
+    rows = await db.execute_fetchall("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
     assert len(rows) == 1
     assert rows[0][0] == 2
 
@@ -99,9 +97,7 @@ async def test_enqueue_multiple_tasks():
     assert id2 > id1
 
     db = await server.get_db()
-    rows = await db.execute_fetchall(
-        "SELECT id, task_type FROM pending_memory_tasks ORDER BY id ASC"
-    )
+    rows = await db.execute_fetchall("SELECT id, task_type FROM pending_memory_tasks ORDER BY id ASC")
     assert len(rows) == 2
     assert rows[0][1] == "archive_episode"
     assert rows[1][1] == "update_profile"
@@ -161,9 +157,7 @@ async def test_queue_processes_update_profile():
     db = await server.get_db()
     assert await _wait_queue_drained(db), "Queue did not drain in time"
 
-    rows = await db.execute_fetchall(
-        "SELECT content FROM profiles WHERE agent_id = 'agent-test'"
-    )
+    rows = await db.execute_fetchall("SELECT content FROM profiles WHERE agent_id = 'agent-test'")
     assert len(rows) == 1
     assert "Alice" in rows[0][0]
 
@@ -185,9 +179,7 @@ async def test_queue_processes_archive_episode():
     db = await server.get_db()
     assert await _wait_queue_drained(db), "Queue did not drain in time"
 
-    rows = await db.execute_fetchall(
-        "SELECT summary, keywords FROM episodes WHERE agent_id = 'agent-test'"
-    )
+    rows = await db.execute_fetchall("SELECT summary, keywords FROM episodes WHERE agent_id = 'agent-test'")
     assert len(rows) == 1
     assert len(rows[0][0]) > 0  # summary should be non-empty
 
@@ -199,9 +191,13 @@ async def test_crash_recovery():
     """Tasks persisted before 'crash' should be processed on restart."""
     # Simulate: enqueue without starting the loop
     queue1 = server.MemoryTaskQueue()
-    await queue1.enqueue("update_profile", "agent-crash", [
-        {"content": "I live in Tokyo", "source": {"User": "u1"}},
-    ])
+    await queue1.enqueue(
+        "update_profile",
+        "agent-crash",
+        [
+            {"content": "I live in Tokyo", "source": {"User": "u1"}},
+        ],
+    )
 
     # Verify task is in DB
     db = await server.get_db()
@@ -214,9 +210,7 @@ async def test_crash_recovery():
 
     assert await _wait_queue_drained(db), "Queue did not drain in time"
 
-    rows = await db.execute_fetchall(
-        "SELECT content FROM profiles WHERE agent_id = 'agent-crash'"
-    )
+    rows = await db.execute_fetchall("SELECT content FROM profiles WHERE agent_id = 'agent-crash'")
     assert len(rows) == 1
     assert "Tokyo" in rows[0][0]
 
@@ -269,9 +263,7 @@ async def test_fifo_ordering():
 async def test_tool_update_profile_queues():
     """update_profile tool should enqueue when task queue is active."""
     server._task_queue = server.MemoryTaskQueue()
-    result = await server.do_update_profile_or_queue(
-        "agent-q", [{"content": "test", "source": {"User": "u"}}]
-    )
+    result = await server.do_update_profile_or_queue("agent-q", [{"content": "test", "source": {"User": "u"}}])
     assert result["ok"] is True
     assert result["queued"] is True
     assert "task_id" in result
@@ -290,9 +282,7 @@ async def test_tool_update_profile_queues():
 async def test_tool_archive_episode_queues():
     """archive_episode tool should enqueue when task queue is active."""
     server._task_queue = server.MemoryTaskQueue()
-    result = await server.do_archive_episode_or_queue(
-        "agent-q", [{"content": "conversation data"}]
-    )
+    result = await server.do_archive_episode_or_queue("agent-q", [{"content": "conversation data"}])
     assert result["ok"] is True
     assert result["queued"] is True
 

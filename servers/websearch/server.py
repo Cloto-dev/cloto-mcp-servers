@@ -5,7 +5,6 @@ Fallback chain: SearXNG (self-hosted) → Tavily (cloud API) → DuckDuckGo (zer
 """
 
 import asyncio
-import json
 import os
 import sys
 
@@ -20,7 +19,7 @@ from mcp.server.stdio import stdio_server
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
 from common.mcp_utils import ToolRegistry
-from common.search import create_search_provider, PROVIDER, SEARXNG_URL, TAVILY_API_KEY
+from common.search import PROVIDER, SEARXNG_URL, TAVILY_API_KEY, create_search_provider
 
 # ============================================================
 # Configuration
@@ -37,14 +36,18 @@ provider = create_search_provider()
 # Page Fetcher
 # ============================================================
 
+
 async def fetch_page_content(url: str, max_length: int) -> str:
     """Fetch a URL and extract text content."""
     client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True, proxy=None)
     try:
-        resp = await client.get(url, headers={
-            "User-Agent": "ClotoCore/0.4 (Web Search MCP Server)",
-            "Accept": "text/html,application/xhtml+xml,text/plain",
-        })
+        resp = await client.get(
+            url,
+            headers={
+                "User-Agent": "ClotoCore/0.4 (Web Search MCP Server)",
+                "Accept": "text/html,application/xhtml+xml,text/plain",
+            },
+        )
         resp.raise_for_status()
         content_type = resp.headers.get("content-type", "")
 
@@ -63,25 +66,27 @@ async def fetch_page_content(url: str, max_length: int) -> str:
 def html_to_text(html: str) -> str:
     """Simple HTML to text conversion without heavy dependencies."""
     import re
+
     # Remove script and style blocks
-    text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
     # Convert common block elements to newlines
-    text = re.sub(r'<(?:p|div|h[1-6]|li|br|tr)[^>]*>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r"<(?:p|div|h[1-6]|li|br|tr)[^>]*>", "\n", text, flags=re.IGNORECASE)
     # Remove remaining tags
-    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r"<[^>]+>", "", text)
     # Decode common entities
-    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-    text = text.replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
+    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    text = text.replace("&quot;", '"').replace("&#39;", "'").replace("&nbsp;", " ")
     # Collapse whitespace
-    text = re.sub(r'\n\s*\n', '\n\n', text)
-    text = re.sub(r' +', ' ', text)
+    text = re.sub(r"\n\s*\n", "\n\n", text)
+    text = re.sub(r" +", " ", text)
     return text.strip()
 
 
 # ============================================================
 # Provider Health Check
 # ============================================================
+
 
 async def check_provider_status(name: str) -> dict:
     """Check if a specific provider is configured and reachable."""
@@ -108,15 +113,20 @@ async def check_provider_status(name: str) -> dict:
             "name": name,
             "configured": configured,
             "reachable": configured,  # If key is set, API is reachable (cloud service)
-            "setup_hint": "Register at https://tavily.com (free, no credit card) and add TAVILY_API_KEY to .env." if not configured else None,
+            "setup_hint": "Register at https://tavily.com (free, no credit card) and add TAVILY_API_KEY to .env."
+            if not configured
+            else None,
         }
     elif name == "duckduckgo":
         # DuckDuckGo HTML scraping — no external deps, always available
         error_detail = None
         try:
             async with httpx.AsyncClient(timeout=10, proxy=None) as client:
-                resp = await client.get("https://html.duckduckgo.com/html/", params={"q": "test"},
-                                        headers={"User-Agent": "Mozilla/5.0 (compatible; ClotoCore/0.6)"})
+                resp = await client.get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": "test"},
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; ClotoCore/0.6)"},
+                )
                 reachable = resp.status_code == 200
                 if not reachable:
                     error_detail = f"HTTP {resp.status_code}"
@@ -128,7 +138,8 @@ async def check_provider_status(name: str) -> dict:
             "configured": True,
             "reachable": reachable,
             "note": "Zero-config fallback via HTML scraping. No external deps required."
-                if reachable else f"DuckDuckGo HTML endpoint unreachable. Error: {error_detail}",
+            if reachable
+            else f"DuckDuckGo HTML endpoint unreachable. Error: {error_detail}",
         }
     return {"name": name, "configured": False, "reachable": False}
 
@@ -151,7 +162,11 @@ registry = ToolRegistry("cloto-mcp-websearch")
             "query": {"type": "string", "description": "The search query"},
             "max_results": {"type": "integer", "description": "Maximum results to return (default: 5, max: 20)"},
             "language": {"type": "string", "description": "Language code (e.g., 'en', 'ja'). Default: 'en'"},
-            "time_range": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Filter results by recency"},
+            "time_range": {
+                "type": "string",
+                "enum": ["day", "week", "month", "year"],
+                "description": "Filter results by recency",
+            },
         },
         "required": ["query"],
     },
@@ -183,8 +198,7 @@ async def handle_web_search(arguments: dict) -> dict:
 
 @registry.tool(
     "fetch_page",
-    "Fetch a web page and extract its text content. "
-    "Use after web_search to read the full content of a result.",
+    "Fetch a web page and extract its text content. Use after web_search to read the full content of a result.",
     {
         "type": "object",
         "properties": {
@@ -238,6 +252,7 @@ async def handle_search_status(arguments: dict) -> dict:
 # ============================================================
 # Entry Point
 # ============================================================
+
 
 async def main():
     try:

@@ -3,7 +3,6 @@ Shared search provider abstraction for Cloto MCP servers.
 Fallback chain: SearXNG (self-hosted) → Tavily (cloud API) → DuckDuckGo (zero-config).
 """
 
-import asyncio
 import os
 import sys
 from abc import ABC, abstractmethod
@@ -24,16 +23,17 @@ REQUEST_TIMEOUT = int(os.environ.get("CLOTO_SEARCH_TIMEOUT", "15"))
 # Provider Abstraction
 # ============================================================
 
+
 class SearchProvider(ABC):
     name: str = "unknown"
 
     @abstractmethod
-    async def search(self, query: str, max_results: int, language: str, time_range: str | None) -> list[dict]:
-        ...
+    async def search(self, query: str, max_results: int, language: str, time_range: str | None) -> list[dict]: ...
 
 
 class SearXNGProvider(SearchProvider):
     """Self-hosted SearXNG — no API key, unlimited queries, full privacy."""
+
     name = "searxng"
 
     def __init__(self, base_url: str):
@@ -59,16 +59,19 @@ class SearXNGProvider(SearchProvider):
 
         results = []
         for r in data.get("results", [])[:max_results]:
-            results.append({
-                "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "snippet": r.get("content", ""),
-            })
+            results.append(
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("url", ""),
+                    "snippet": r.get("content", ""),
+                }
+            )
         return results
 
 
 class TavilyProvider(SearchProvider):
     """Tavily — AI-optimized search, 1000 free queries/month."""
+
     name = "tavily"
 
     def __init__(self, api_key: str):
@@ -95,11 +98,13 @@ class TavilyProvider(SearchProvider):
 
         results = []
         for r in data.get("results", [])[:max_results]:
-            results.append({
-                "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "snippet": r.get("content", ""),
-            })
+            results.append(
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("url", ""),
+                    "snippet": r.get("content", ""),
+                }
+            )
         return results
 
 
@@ -110,6 +115,7 @@ class DuckDuckGoProvider(SearchProvider):
     DuckDuckGo functionality. This provider scrapes DuckDuckGo's HTML endpoint
     directly, which is stable and does not require any third-party library.
     """
+
     name = "duckduckgo"
 
     async def search(self, query: str, max_results: int, language: str, time_range: str | None) -> list[dict]:
@@ -155,7 +161,7 @@ class DuckDuckGoProvider(SearchProvider):
             snippet = ""
             snippet_match = re.search(
                 r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
-                html[match.end():match.end() + 2000],
+                html[match.end() : match.end() + 2000],
                 re.DOTALL,
             )
             if snippet_match:
@@ -170,6 +176,7 @@ class DuckDuckGoProvider(SearchProvider):
 
 class ChainProvider(SearchProvider):
     """Try providers in order, falling back on failure."""
+
     name = "chain"
 
     def __init__(self, providers: list[SearchProvider]):

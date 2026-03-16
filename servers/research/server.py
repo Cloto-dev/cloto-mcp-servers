@@ -48,6 +48,7 @@ SEARCH_TIMEOUT = 15
 # LLM Proxy Client
 # ============================================================
 
+
 async def call_llm(provider: str, prompt: str, system: str | None = None) -> str:
     """Call LLM via kernel proxy with provider selection."""
     messages = []
@@ -92,6 +93,7 @@ def format_search_results(results: list[dict]) -> tuple[str, dict[str, str]]:
 # ============================================================
 # Prompts
 # ============================================================
+
 
 def query_expansion_prompt(query: str) -> str:
     return f"""You are a search engineer. Generate 3 diverse, specific search queries to find comprehensive information about the user's question.
@@ -165,6 +167,7 @@ Instructions:
 # ============================================================
 # RAG Engine — Self-evaluating research loop
 # ============================================================
+
 
 async def expand_query(query: str) -> list[str]:
     """Expand a query into multiple sub-queries using LLM."""
@@ -347,6 +350,7 @@ async def handle_deep_research(arguments: dict) -> dict:
 # ============================================================
 # Entry Point
 # ============================================================
+
 
 async def main():
     global _cache

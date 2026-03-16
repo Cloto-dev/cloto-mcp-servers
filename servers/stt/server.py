@@ -37,6 +37,7 @@ def _get_model():
         if device == "auto":
             try:
                 import ctranslate2
+
                 device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
             except Exception:
                 device = "cpu"

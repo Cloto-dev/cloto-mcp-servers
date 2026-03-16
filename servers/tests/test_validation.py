@@ -1,7 +1,6 @@
 """Tests for common.validation helpers."""
 
-from common.validation import validate_str, validate_int, validate_dict, validate_list
-
+from common.validation import validate_dict, validate_int, validate_list, validate_str
 
 # ── validate_str ──────────────────────────────────────────────
 

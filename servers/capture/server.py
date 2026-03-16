@@ -48,6 +48,7 @@ def _get_ocr_engine():
 
     try:
         from paddleocr import PaddleOCR
+
         _ocr_engine = PaddleOCR(
             use_angle_cls=True,
             lang="japan",
@@ -71,6 +72,7 @@ async def _run_ocr(file_path: str) -> str | None:
         return None
 
     try:
+
         def _ocr():
             result = engine.ocr(file_path, cls=True)
             if not result or not result[0]:
@@ -157,9 +159,7 @@ async def handle_capture_screen(arguments: dict) -> dict:
             with mss.mss() as sct:
                 monitors = sct.monitors
                 if monitor_idx >= len(monitors):
-                    raise ValueError(
-                        f"Monitor {monitor_idx} not found. Available: 0-{len(monitors) - 1}"
-                    )
+                    raise ValueError(f"Monitor {monitor_idx} not found. Available: 0-{len(monitors) - 1}")
                 screenshot = sct.grab(monitors[monitor_idx])
                 img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
                 img.save(filepath, "PNG")

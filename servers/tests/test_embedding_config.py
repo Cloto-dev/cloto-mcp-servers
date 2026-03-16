@@ -1,6 +1,5 @@
 """Tests for embedding server port range validation (bug-168 verification)."""
 
-import importlib
 import os
 
 import pytest

@@ -33,9 +33,7 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_ID = os.environ.get("CLAUDE_PROVIDER", "claude")
 MODEL_ID = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
-API_URL = os.environ.get(
-    "CLAUDE_API_URL", "http://127.0.0.1:8082/v1/messages"
-)
+API_URL = os.environ.get("CLAUDE_API_URL", "http://127.0.0.1:8082/v1/messages")
 TIMEOUT_SECS = int(os.environ.get("CLAUDE_TIMEOUT_SECS", "120"))
 MAX_TOKENS = int(os.environ.get("CLAUDE_MAX_TOKENS", "4096"))
 
@@ -85,11 +83,13 @@ def _convert_tools_to_anthropic(openai_tools: list[dict]) -> list[dict]:
         name = fn.get("name", "")
         if not name:
             continue
-        anthropic_tools.append({
-            "name": name,
-            "description": fn.get("description", ""),
-            "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
-        })
+        anthropic_tools.append(
+            {
+                "name": name,
+                "description": fn.get("description", ""),
+                "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+            }
+        )
     return anthropic_tools
 
 
@@ -123,25 +123,31 @@ def _convert_tool_history(tool_history: list[dict]) -> list[dict]:
                         args = json.loads(args)
                     except json.JSONDecodeError:
                         args = {}
-                content_blocks.append({
-                    "type": "tool_use",
-                    "id": tc.get("id", ""),
-                    "name": fn.get("name", ""),
-                    "input": args,
-                })
+                content_blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "input": args,
+                    }
+                )
             if content_blocks:
                 messages.append({"role": "assistant", "content": content_blocks})
 
         elif role == "tool":
             # Convert to Anthropic tool_result
-            messages.append({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": entry.get("tool_call_id", ""),
-                    "content": entry.get("content", ""),
-                }],
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": entry.get("tool_call_id", ""),
+                            "content": entry.get("content", ""),
+                        }
+                    ],
+                }
+            )
 
     return messages
 
@@ -176,17 +182,19 @@ def _parse_anthropic_response(response_data: dict) -> dict:
         elif block_type == "thinking":
             thinking_parts.append(block.get("thinking", ""))
         elif block_type == "tool_use":
-            tool_calls.append({
-                "id": block.get("id", ""),
-                "name": block.get("name", ""),
-                "arguments": block.get("input", {}),
-            })
+            tool_calls.append(
+                {
+                    "id": block.get("id", ""),
+                    "name": block.get("name", ""),
+                    "arguments": block.get("input", {}),
+                }
+            )
 
     # Tool calls detected
     if stop_reason == "tool_use" and tool_calls:
         # Prefer text content, fall back to thinking content (extended thinking models)
-        assistant_content = "\n".join(text_parts) if text_parts else (
-            "\n".join(thinking_parts) if thinking_parts else None
+        assistant_content = (
+            "\n".join(text_parts) if text_parts else ("\n".join(thinking_parts) if thinking_parts else None)
         )
         return {
             "type": "tool_calls",
@@ -272,12 +280,28 @@ async def call_claude_api(
 
 def _error_response(error: Exception) -> list[TextContent]:
     if isinstance(error, ClaudeApiError):
-        return [TextContent(type="text", text=json.dumps({
-            "error": error.message, "error_code": error.code,
-        }))]
-    return [TextContent(type="text", text=json.dumps({
-        "error": str(error), "error_code": "internal",
-    }))]
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "error": error.message,
+                        "error_code": error.code,
+                    }
+                ),
+            )
+        ]
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps(
+                {
+                    "error": str(error),
+                    "error_code": "internal",
+                }
+            ),
+        )
+    ]
 
 
 # ============================================================
@@ -297,12 +321,8 @@ async def handle_think(arguments: dict) -> list[TextContent]:
 
         # Extract text from content blocks
         content_blocks = response_data.get("content", [])
-        text = "\n".join(
-            b.get("text", "") for b in content_blocks if b.get("type") == "text"
-        )
-        return [TextContent(
-            type="text", text=json.dumps({"type": "final", "content": text})
-        )]
+        text = "\n".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
+        return [TextContent(type="text", text=json.dumps({"type": "final", "content": text}))]
     except Exception as e:
         return _error_response(e)
 
@@ -316,9 +336,7 @@ async def handle_think_with_tools(arguments: dict) -> list[TextContent]:
         tools = arguments.get("tools", [])
         tool_history = arguments.get("tool_history", [])
 
-        system, messages = _extract_system_and_messages(
-            agent, message, context, tools=tools
-        )
+        system, messages = _extract_system_and_messages(agent, message, context, tools=tools)
 
         # Append tool history (converted to Anthropic format)
         messages.extend(_convert_tool_history(tool_history))
@@ -389,9 +407,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif name == "think_with_tools":
         return await handle_think_with_tools(arguments)
     else:
-        return [TextContent(
-            type="text", text=json.dumps({"error": f"Unknown tool: {name}"})
-        )]
+        return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
 
 async def main():
@@ -401,9 +417,7 @@ async def main():
     )
     logger.info(f"Starting Claude MCP server (model={MODEL_ID})")
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream, write_stream, server.create_initialization_options()
-        )
+        await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 if __name__ == "__main__":

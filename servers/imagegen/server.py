@@ -142,10 +142,7 @@ async def handle_list_models(args: dict) -> dict:
             response.raise_for_status()
             models = response.json()
 
-        model_list = [
-            {"title": m.get("title", ""), "model_name": m.get("model_name", "")}
-            for m in models
-        ]
+        model_list = [{"title": m.get("title", ""), "model_name": m.get("model_name", "")} for m in models]
 
         return {"models": model_list, "count": len(model_list)}
     except httpx.ConnectError:

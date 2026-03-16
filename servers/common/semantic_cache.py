@@ -55,7 +55,9 @@ class SemanticCache:
         self._client = httpx.AsyncClient(timeout=10)
         logger.info(
             "SemanticCache initialized (max=%d, ttl=%ds, threshold=%.2f)",
-            self._max_entries, self._ttl, self._threshold,
+            self._max_entries,
+            self._ttl,
+            self._threshold,
         )
 
     async def close(self):
@@ -69,9 +71,7 @@ class SemanticCache:
         if not self._client:
             return None
         try:
-            resp = await self._client.post(
-                self._embedding_url, json={"texts": [text]}
-            )
+            resp = await self._client.post(self._embedding_url, json={"texts": [text]})
             resp.raise_for_status()
             embeddings = resp.json().get("embeddings", [])
             if not embeddings:

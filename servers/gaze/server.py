@@ -14,8 +14,9 @@ import sys
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
-from common.mcp_utils import ToolRegistry, run_mcp_server
 from gaze_engine import GazeEngine
+
+from common.mcp_utils import ToolRegistry, run_mcp_server
 
 # ============================================================
 # Server setup
@@ -87,8 +88,7 @@ async def handle_get_gaze(arguments: dict) -> dict:
 
 @registry.tool(
     "is_user_present",
-    "Check if a user face is currently detected by the camera. "
-    "Useful for attention monitoring and presence detection.",
+    "Check if a user face is currently detected by the camera. Useful for attention monitoring and presence detection.",
     {"type": "object", "properties": {}, "required": []},
 )
 async def handle_is_user_present(arguments: dict) -> dict:

@@ -7,8 +7,8 @@ unit conversion, encoding/decoding, and hashing.
 All tools use Python stdlib only — no external dependencies.
 """
 
-import asyncio
 import ast
+import asyncio
 import base64
 import hashlib
 import html
@@ -112,23 +112,41 @@ def safe_calculate(expression: str):
 _UNIT_TABLE = {
     "length": {
         "base": "m",
-        "mm": 0.001, "cm": 0.01, "m": 1.0, "km": 1000.0,
-        "in": 0.0254, "ft": 0.3048, "yd": 0.9144, "mi": 1609.344,
+        "mm": 0.001,
+        "cm": 0.01,
+        "m": 1.0,
+        "km": 1000.0,
+        "in": 0.0254,
+        "ft": 0.3048,
+        "yd": 0.9144,
+        "mi": 1609.344,
     },
     "weight": {
         "base": "kg",
-        "mg": 1e-6, "g": 0.001, "kg": 1.0, "t": 1000.0,
-        "oz": 0.028349523125, "lb": 0.45359237,
+        "mg": 1e-6,
+        "g": 0.001,
+        "kg": 1.0,
+        "t": 1000.0,
+        "oz": 0.028349523125,
+        "lb": 0.45359237,
     },
     "temperature": {"base": "special"},
     "time": {
         "base": "s",
-        "ms": 0.001, "s": 1.0, "min": 60.0, "h": 3600.0,
-        "d": 86400.0, "week": 604800.0,
+        "ms": 0.001,
+        "s": 1.0,
+        "min": 60.0,
+        "h": 3600.0,
+        "d": 86400.0,
+        "week": 604800.0,
     },
     "data": {
         "base": "B",
-        "B": 1.0, "KB": 1024.0, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4,
+        "B": 1.0,
+        "KB": 1024.0,
+        "MB": 1024**2,
+        "GB": 1024**3,
+        "TB": 1024**4,
     },
 }
 

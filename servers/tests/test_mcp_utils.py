@@ -1,6 +1,5 @@
 """Tests for common.mcp_utils ToolRegistry."""
 
-import json
 import os
 import sys
 
@@ -15,7 +14,9 @@ from common.mcp_utils import ToolRegistry
 def registry():
     reg = ToolRegistry("test-server")
 
-    @reg.tool("greet", "Say hello", {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]})
+    @reg.tool(
+        "greet", "Say hello", {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+    )
     async def greet(arguments: dict) -> dict:
         return {"message": f"Hello, {arguments['name']}!"}
 
@@ -36,7 +37,6 @@ def test_tool_registration(registry):
 @pytest.mark.asyncio
 async def test_list_tools(registry):
     """list_tools handler should return all registered tools."""
-    handlers = registry.server.request_handlers
     # The list_tools handler is registered on the server
     assert len(registry._tools) == 2
     assert registry._tools[0].description == "Say hello"

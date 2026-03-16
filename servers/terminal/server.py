@@ -5,7 +5,6 @@ Ported from plugins/terminal/src/lib.rs + sandbox.rs
 """
 
 import asyncio
-import json
 import os
 import shlex
 import sys
@@ -20,9 +19,7 @@ from common.mcp_utils import ToolRegistry, run_mcp_server
 # ============================================================
 
 _DEFAULT_SANDBOX = (
-    os.path.join(os.environ.get("TEMP", "C:\\Temp"), "cloto-sandbox")
-    if os.name == "nt"
-    else "/tmp/cloto-sandbox"
+    os.path.join(os.environ.get("TEMP", "C:\\Temp"), "cloto-sandbox") if os.name == "nt" else "/tmp/cloto-sandbox"
 )
 WORKING_DIR = os.environ.get("CLOTO_SANDBOX_DIR", _DEFAULT_SANDBOX)
 MAX_OUTPUT_BYTES = int(os.environ.get("CLOTO_MAX_OUTPUT_BYTES", "65536"))
@@ -37,19 +34,48 @@ if ALLOWED_COMMANDS_STR:
 # ============================================================
 
 BLOCKED_PATTERNS = [
-    "rm -rf /", "rm -fr /", "mkfs", "dd if=/dev",
-    ":(){ :|:& };:", "> /dev/sda", "shutdown", "reboot",
-    "init 0", "init 6", "chmod -r 777 /", "chown -r",
-    "sudo ", "su ", "su\t", "doas ",
-    "/bin/rm -rf", "/usr/bin/rm -rf",
-    "python -c", "python2 -c", "python3 -c",
-    "perl -e", "ruby -e", "node -e", "php -r", "lua -e",
-    "nc -e", "ncat -e", "socat exec:",
-    "shred ", "wipefs",
+    "rm -rf /",
+    "rm -fr /",
+    "mkfs",
+    "dd if=/dev",
+    ":(){ :|:& };:",
+    "> /dev/sda",
+    "shutdown",
+    "reboot",
+    "init 0",
+    "init 6",
+    "chmod -r 777 /",
+    "chown -r",
+    "sudo ",
+    "su ",
+    "su\t",
+    "doas ",
+    "/bin/rm -rf",
+    "/usr/bin/rm -rf",
+    "python -c",
+    "python2 -c",
+    "python3 -c",
+    "perl -e",
+    "ruby -e",
+    "node -e",
+    "php -r",
+    "lua -e",
+    "nc -e",
+    "ncat -e",
+    "socat exec:",
+    "shred ",
+    "wipefs",
 ]
 
 BLOCKED_METACHAR_PATTERNS = [
-    "$(", "`", "|", ";", "&&", "||", ">", "<",
+    "$(",
+    "`",
+    "|",
+    ";",
+    "&&",
+    "||",
+    ">",
+    "<",
 ]
 
 
@@ -64,9 +90,7 @@ def validate_command(command: str) -> None:
 
     # Block embedded newlines/carriage returns and Unicode line separators
     if "\n" in command or "\r" in command or "\u2028" in command or "\u2029" in command:
-        raise ValueError(
-            "Command contains embedded newline or line separator (potential injection)"
-        )
+        raise ValueError("Command contains embedded newline or line separator (potential injection)")
 
     lower = command.lower()
 
@@ -84,14 +108,8 @@ def validate_command(command: str) -> None:
     normalized = " ".join(lower.split())
     if normalized.startswith("rm ") or "/rm " in normalized:
         tokens = normalized.split()
-        has_recursive = any(
-            t.startswith("-") and not t.startswith("--") and ("r" in t or "R" in t)
-            for t in tokens
-        )
-        has_force = any(
-            t.startswith("-") and not t.startswith("--") and "f" in t
-            for t in tokens
-        )
+        has_recursive = any(t.startswith("-") and not t.startswith("--") and ("r" in t or "R" in t) for t in tokens)
+        has_force = any(t.startswith("-") and not t.startswith("--") and "f" in t for t in tokens)
         if has_recursive and has_force:
             raise ValueError("Command contains dangerous rm flags (-r and -f)")
 
@@ -99,10 +117,7 @@ def validate_command(command: str) -> None:
     if ALLOWED_COMMANDS is not None:
         first_word = command.split()[0] if command.split() else ""
         if first_word not in ALLOWED_COMMANDS:
-            raise ValueError(
-                f"Command '{first_word}' is not in the allowlist. "
-                f"Allowed: {ALLOWED_COMMANDS}"
-            )
+            raise ValueError(f"Command '{first_word}' is not in the allowlist. Allowed: {ALLOWED_COMMANDS}")
 
 
 def safe_truncate(s: str, max_bytes: int) -> str:
@@ -173,9 +188,7 @@ async def handle_execute(arguments: dict) -> dict:
         )
 
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_secs
-            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout_secs)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
@@ -186,15 +199,9 @@ async def handle_execute(arguments: dict) -> dict:
 
         # Safe UTF-8 truncation
         if len(stdout.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            stdout = (
-                safe_truncate(stdout, MAX_OUTPUT_BYTES)
-                + f"...[truncated, {len(stdout_bytes)} bytes total]"
-            )
+            stdout = safe_truncate(stdout, MAX_OUTPUT_BYTES) + f"...[truncated, {len(stdout_bytes)} bytes total]"
         if len(stderr.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            stderr = (
-                safe_truncate(stderr, MAX_OUTPUT_BYTES)
-                + f"...[truncated, {len(stderr_bytes)} bytes total]"
-            )
+            stderr = safe_truncate(stderr, MAX_OUTPUT_BYTES) + f"...[truncated, {len(stderr_bytes)} bytes total]"
 
         exit_code = proc.returncode if proc.returncode is not None else -1
 
