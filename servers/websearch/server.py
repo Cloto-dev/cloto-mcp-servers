@@ -9,6 +9,11 @@ import json
 import os
 import sys
 
+# Clear proxy env vars injected by kernel isolation — websearch needs direct
+# internet access to reach DuckDuckGo/SearXNG/Tavily endpoints.
+for _proxy_key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"]:
+    os.environ.pop(_proxy_key, None)
+
 import httpx
 from mcp.server.stdio import stdio_server
 
@@ -227,7 +232,11 @@ async def handle_search_status(arguments: dict) -> dict:
             active = s["name"]
             break
 
-    return {"mode": PROVIDER, "active_provider": active, "chain": chain}
+    # Debug: include proxy env vars to diagnose connectivity issues
+    proxy_env = {k: os.environ.get(k, "<not set>") for k in
+                 ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY",
+                  "CLOTO_LLM_PROXY", "CLOTO_LLM_PROXY_PORT", "NO_PROXY"]}
+    return {"mode": PROVIDER, "active_provider": active, "chain": chain, "debug_proxy_env": proxy_env}
 
 
 # ============================================================
