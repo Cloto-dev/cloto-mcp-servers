@@ -1,41 +1,38 @@
 # cloto-mcp-servers Development Rules
 
-## Overview
+## Mandatory Reads
 
-This repository contains all Python MCP/MGP servers for the ClotoCore project.
-Extracted from the ClotoCore monorepo (https://github.com/Cloto-dev/ClotoCore).
+- **`docs/MGP_SPEC.md`** -- MGP protocol (strict MCP superset). Read before changing protocol handling.
 
-## MGP (Model General Protocol) -- MANDATORY
+## Commands
 
-MGP is a strict superset of MCP. Read `docs/MGP_SPEC.md` and related MGP docs
-in `docs/` before making changes to any server's protocol handling.
+- Test: `cd servers && python -m pytest tests/ -v`
+- Lint: `ruff check servers/`
+- Format: `ruff format servers/`
+- Format check: `ruff format --check servers/`
+- Auto-fix: `ruff check --fix servers/`
+- Bug verify: `bash scripts/verify-issues.sh`
+- Test ratchet: `bash scripts/check-test-count.sh`
+- Sentinel: `bash scripts/sentinel.sh`
 
-## Project Structure
+## Bug Verification
 
-- `servers/` -- all MCP server implementations + common module + tests
-- `servers/common/` -- shared utilities (ToolRegistry, validation, LLM provider, search)
-- `servers/tests/` -- pytest test suite
-- `docs/` -- MGP specification and design documents
-- `dev-notes/` -- internal audit and evaluation notes
+- Source of truth: `qa/issue-registry.json`
+- Discovery: add entry -> `bash scripts/verify-issues.sh` -> must return `[VERIFIED]`
+- Fix: update `expected`->`"absent"`, `status`->`"fixed"` -> re-verify -> must return `[FIXED]`
+- `scripts/verify-issues.sh` is **read-only infrastructure** -- never modify without user approval
 
 ## Adding a New MCP Server
 
-1. Create `servers/<name>/server.py`
-2. Use `ToolRegistry` from `common/mcp_utils.py`
-3. Add a `servers/<name>/pyproject.toml`
-4. Add tests to `servers/tests/`
-5. Add the server entry to ClotoCore's `mcp.toml`
+1. Create `servers/<name>/server.py` (use `ToolRegistry` from `common/mcp_utils.py`)
+2. Add `servers/<name>/pyproject.toml`
+3. Add tests to `servers/tests/`
+4. Register in `registry.json`
+5. Add server entry to ClotoCore's `mcp.toml`
 
 ## Integration with ClotoCore
 
-This repo is consumed by ClotoCore via `mcp.toml`'s `[paths]` section:
-
-```toml
-[paths]
-servers = "/path/to/cloto-mcp-servers/servers"
-```
-
-Server args use `${servers}/terminal/server.py` variable expansion.
+Consumed via `mcp.toml`'s `[paths].servers` with `${servers}/terminal/server.py` variable expansion.
 
 ## Git Rules
 
@@ -43,8 +40,7 @@ Server args use `${servers}/terminal/server.py` variable expansion.
 - Git author: `ClotoCore Project <ClotoCore@proton.me>`
 - Do NOT push without explicit user permission
 
-## Testing
+## Prohibited
 
-```bash
-cd servers && python -m pytest tests/ -v
-```
+- Do NOT remove tests without updating `qa/test-baseline.json`
+- Do NOT modify `scripts/verify-issues.sh` without user approval
