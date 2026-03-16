@@ -28,6 +28,9 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Rust
+target/
+
 # AI assistants
 .claude/
 !.claude/settings.json

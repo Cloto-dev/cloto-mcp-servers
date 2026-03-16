@@ -274,6 +274,25 @@
       "trust_level": "standard",
       "auto_restart": false,
       "icon": "mic"
+    },
+    {
+      "id": "output.avatar",
+      "name": "Avatar MGP Server",
+      "description": "VRM expression, idle behavior, and VOICEVOX TTS integration",
+      "category": "output",
+      "version": "0.6.3-alpha.4",
+      "directory": "avatar",
+      "dependencies": [],
+      "env_vars": [
+        { "key": "VOICEVOX_URL", "default": "http://localhost:50021", "description": "VOICEVOX engine URL" },
+        { "key": "VOICEVOX_SPEAKER", "default": "47", "description": "Speaker ID" },
+        { "key": "VOICEVOX_SPEED", "default": "1.0", "description": "Speech speed multiplier" }
+      ],
+      "optional_env_vars": [],
+      "tags": ["avatar", "vrm", "tts", "voicevox", "mgp"],
+      "trust_level": "core",
+      "auto_restart": false,
+      "icon": "user"
     }
   ]
 }
