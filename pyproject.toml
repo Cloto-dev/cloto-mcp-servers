@@ -8,3 +8,22 @@ license = "BSL-1.1"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"servers/*/server.py" = ["E402"]
+"servers/tests/*.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["common"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
