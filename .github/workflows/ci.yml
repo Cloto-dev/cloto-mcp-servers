@@ -46,6 +46,7 @@ jobs:
           cd servers
           python -m venv .venv
           .venv/bin/pip install --upgrade pip --quiet
+          .venv/bin/pip install pytest pytest-asyncio --quiet
           for d in */; do
             if [ -f "$d/pyproject.toml" ] && [ "$d" != "common/" ] && [ "$d" != "tests/" ]; then
               .venv/bin/pip install "$d" --quiet
