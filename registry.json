@@ -282,6 +282,8 @@
       "category": "output",
       "version": "0.6.3-alpha.4",
       "directory": "avatar",
+      "runtime": "rust",
+      "bin_name": "mgp-avatar",
       "dependencies": [],
       "env_vars": [
         { "key": "VOICEVOX_URL", "default": "http://localhost:50021", "description": "VOICEVOX engine URL" },
