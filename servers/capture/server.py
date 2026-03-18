@@ -14,9 +14,11 @@ OCR Modes (VISION_OCR_MODE env var):
 """
 
 import asyncio
+import atexit
 import base64
 import logging
 import os
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -269,9 +271,28 @@ async def handle_analyze_image(arguments: dict) -> dict:
 
 OLLAMA_BIN = os.environ.get("OLLAMA_BIN", "ollama")
 
+# Track Ollama subprocess if we started it (cleanup on exit)
+_ollama_proc: subprocess.Popen | None = None
+
+
+def _cleanup_ollama():
+    """Terminate Ollama subprocess on exit (only if we started it)."""
+    global _ollama_proc
+    if _ollama_proc is not None and _ollama_proc.poll() is None:
+        logger.info("Terminating Ollama subprocess (PID %d)", _ollama_proc.pid)
+        _ollama_proc.terminate()
+        try:
+            _ollama_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _ollama_proc.kill()
+            _ollama_proc.wait()
+        _ollama_proc = None
+
 
 async def _ensure_ollama_running():
     """Check if Ollama is reachable; if not, start it as a background process."""
+    global _ollama_proc
+
     if VISION_OCR_MODE == "ocr":
         return  # No need for Ollama in OCR-only mode
 
@@ -286,7 +307,6 @@ async def _ensure_ollama_running():
 
     # Try to find ollama binary
     import shutil
-    import subprocess
 
     ollama_path = shutil.which(OLLAMA_BIN)
     if not ollama_path:
@@ -305,12 +325,14 @@ async def _ensure_ollama_running():
         return
 
     logger.info("Starting Ollama: %s serve", ollama_path)
-    subprocess.Popen(
+    _ollama_proc = subprocess.Popen(
         [ollama_path, "serve"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+    atexit.register(_cleanup_ollama)
+    logger.info("Ollama started (PID %d), registered cleanup handler", _ollama_proc.pid)
 
     # Wait for Ollama to become ready (up to 15 seconds)
     for i in range(30):

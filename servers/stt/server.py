@@ -131,5 +131,29 @@ async def handle_list_models(args: dict) -> dict:
     }
 
 
+@registry.tool(
+    "unload_model",
+    "Unload the Whisper model from memory to free VRAM/RAM. The model will be reloaded on next transcribe call.",
+    {"type": "object", "properties": {}},
+)
+async def handle_unload_model(args: dict) -> dict:
+    global _model
+    if _model is None:
+        return {"status": "not_loaded", "message": "No model is currently loaded."}
+    del _model
+    _model = None
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    return {"status": "unloaded", "message": "Whisper model unloaded from memory."}
+
+
 if __name__ == "__main__":
     asyncio.run(run_mcp_server(registry))
