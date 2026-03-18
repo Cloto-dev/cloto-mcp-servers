@@ -1,15 +1,18 @@
 """
 Cloto MCP Server: Ollama
-Local LLM inference via Ollama's OpenAI-compatible API.
-Supports dynamic model switching and local model discovery.
+Local LLM inference via Ollama's native chat API.
+Supports dynamic model switching, tool calling, and local model discovery.
 
 Tools:
-  - think:         Generate a text response using the active Ollama model
-  - list_models:   List locally installed Ollama models
-  - switch_model:  Change the active model for this session
+  - think:            Generate a text response using the active Ollama model
+  - think_with_tools: Generate a response that may include tool calls
+  - list_models:      List locally installed Ollama models
+  - switch_model:     Change the active model for this session
+  - unload_model:     Unload a model from VRAM
 """
 
 import asyncio
+import json
 import os
 import sys
 
@@ -65,7 +68,7 @@ def parse_chat_content(response_data: dict) -> str:
 # ============================================================
 
 
-async def call_ollama_api(messages: list[dict]) -> dict:
+async def call_ollama_api(messages: list[dict], tools: list[dict] | None = None) -> dict:
     """Send a request to the Ollama native chat API (/api/chat)."""
     async with _model_lock:
         model = _active_model
@@ -82,6 +85,9 @@ async def call_ollama_api(messages: list[dict]) -> dict:
         "think": ENABLE_THINKING,
     }
 
+    if tools:
+        body["tools"] = tools
+
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.post(
             f"{BASE_URL}/api/chat",
@@ -92,6 +98,66 @@ async def call_ollama_api(messages: list[dict]) -> dict:
             raise ValueError(f"Model '{model}' not found in Ollama. Install it with: ollama pull {model}")
         response.raise_for_status()
         return response.json()
+
+
+def _sanitize_tool_names(tools: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """Replace dots in tool names with underscores for Ollama API compatibility."""
+    sanitized = []
+    reverse_map: dict[str, str] = {}
+    for tool in tools:
+        fn = tool.get("function", {})
+        original = fn.get("name", "")
+        safe = original.replace(".", "_")
+        if safe != original:
+            reverse_map[safe] = original
+            tool = json.loads(json.dumps(tool))
+            tool["function"]["name"] = safe
+        sanitized.append(tool)
+    return sanitized, reverse_map
+
+
+def parse_think_result(response_data: dict, reverse_map: dict[str, str] | None = None) -> dict:
+    """Parse Ollama /api/chat response into a think result.
+
+    Returns either:
+      {"type": "final", "content": "..."}
+    or:
+      {"type": "tool_calls", "assistant_content": "...", "calls": [...]}
+    """
+    if "error" in response_data:
+        error = response_data["error"]
+        msg = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+        raise ValueError(f"Ollama API Error: {msg}")
+
+    message = response_data.get("message", {})
+    tool_calls = message.get("tool_calls")
+
+    if tool_calls:
+        calls = []
+        for i, tc in enumerate(tool_calls):
+            fn = tc.get("function", {})
+            name = fn.get("name", "")
+            arguments = fn.get("arguments", {})
+            # Ollama returns arguments as dict; ensure it's a dict
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            # Restore original dotted names
+            if reverse_map and name in reverse_map:
+                name = reverse_map[name]
+            call_id = tc.get("id", f"call_ollama_{i}")
+            if name:
+                calls.append({"id": call_id, "name": name, "arguments": arguments})
+        if calls:
+            return {
+                "type": "tool_calls",
+                "assistant_content": message.get("content", ""),
+                "calls": calls,
+            }
+
+    return {"type": "final", "content": message.get("content", "")}
 
 
 async def fetch_ollama_models() -> list[dict]:
@@ -134,6 +200,61 @@ async def handle_think(arguments: dict) -> dict:
         content = parse_chat_content(response_data)
 
         return {"type": "final", "content": content}
+    except httpx.ConnectError:
+        return {"error": f"Cannot connect to Ollama at {BASE_URL}. Is Ollama running? Start it with: ollama serve"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@registry.tool(
+    "think_with_tools",
+    "Generate a response that may include tool calls. Returns either final text or a list of tool calls to execute.",
+    {
+        "type": "object",
+        "properties": {
+            "agent": {"type": "object", "description": "Agent metadata (name, description, metadata)"},
+            "message": {"type": "object", "description": "User message with 'content' field"},
+            "context": {"type": "array", "description": "Conversation context messages", "items": {"type": "object"}},
+            "tools": {"type": "array", "description": "Available tool schemas (OpenAI format)", "items": {"type": "object"}},
+            "tool_history": {"type": "array", "description": "Prior tool calls and results", "items": {"type": "object"}},
+        },
+        "required": ["agent", "message", "context", "tools", "tool_history"],
+    },
+)
+async def handle_think_with_tools(arguments: dict) -> dict:
+    try:
+        agent = validate_dict(arguments, "agent")
+        message = validate_dict(arguments, "message")
+        context = validate_list(arguments, "context")
+        tools = validate_list(arguments, "tools")
+        tool_history = validate_list(arguments, "tool_history")
+
+        messages = build_chat_messages(agent, message, context, tools=tools)
+
+        # Sanitize dotted tool names for Ollama compatibility
+        sanitized_tools, reverse_map = _sanitize_tool_names(tools)
+
+        # Append tool_history (prior assistant tool_calls + tool results)
+        for entry in tool_history:
+            entry_copy = json.loads(json.dumps(entry))
+            # Sanitize tool names in assistant tool_calls
+            if "tool_calls" in entry_copy:
+                for tc in entry_copy.get("tool_calls", []):
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "")
+                    safe = name.replace(".", "_")
+                    if safe != name:
+                        fn["name"] = safe
+            # Sanitize tool name in tool response
+            elif entry_copy.get("role") == "tool" and "name" in entry_copy:
+                name = entry_copy["name"]
+                safe = name.replace(".", "_")
+                if safe != name:
+                    entry_copy["name"] = safe
+            messages.append(entry_copy)
+
+        response_data = await call_ollama_api(messages, tools=sanitized_tools)
+        return parse_think_result(response_data, reverse_map)
     except httpx.ConnectError:
         return {"error": f"Cannot connect to Ollama at {BASE_URL}. Is Ollama running? Start it with: ollama serve"}
     except Exception as e:
@@ -215,6 +336,46 @@ async def handle_switch_model(arguments: dict) -> dict:
         }
     except httpx.ConnectError:
         return {"error": f"Cannot connect to Ollama at {BASE_URL}. Is Ollama running? Start it with: ollama serve"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@registry.tool(
+    "unload_model",
+    "Unload a model from GPU VRAM to free memory. If no model is specified, unloads the currently active model.",
+    {
+        "type": "object",
+        "properties": {
+            "model": {
+                "type": "string",
+                "description": "Model name to unload. Defaults to the active model if omitted.",
+            },
+        },
+    },
+)
+async def handle_unload_model(arguments: dict) -> dict:
+    async with _model_lock:
+        target = arguments.get("model", "").strip() or _active_model
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{BASE_URL}/api/generate",
+                json={"model": target, "keep_alive": 0},
+            )
+            response.raise_for_status()
+
+        return {
+            "status": "unloaded",
+            "model": target,
+            "message": f"Model '{target}' has been unloaded from VRAM.",
+        }
+    except httpx.ConnectError:
+        return {"error": f"Cannot connect to Ollama at {BASE_URL}. Is Ollama running?"}
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"error": f"Model '{target}' is not loaded or does not exist."}
+        return {"error": str(e)}
     except Exception as e:
         return {"error": str(e)}
 
