@@ -46,7 +46,7 @@ Layer 3: Protocol Methods (4 — irreducible)
   mgp/permission/await, mgp/permission/grant
   mgp/callback/respond, mgp/stream/cancel
 
-Layer 2: Protocol Notifications (6 — fire-and-forget)
+Layer 2: Protocol Notifications (8 — fire-and-forget)
   notifications/mgp.audit, notifications/mgp.lifecycle
   notifications/mgp.stream.chunk, notifications/mgp.stream.progress
   notifications/mgp.stream.pace, notifications/mgp.stream.gap
@@ -85,7 +85,7 @@ Layer 1: Metadata Extensions (0 new methods)
 
 **Context Reduction:** 150,000 tokens (all tools) → 1,000-2,000 tokens (discovery + cache) = **99% reduction**
 
-### 2.5 Extension System (12 independently negotiable)
+### 2.5 Extension System (13 independently negotiable)
 
 | Tier | Extensions | Adoption Time |
 |------|-----------|---------------|
@@ -117,7 +117,7 @@ Layer 1: Metadata Extensions (0 new methods)
 |------|-----|-----|--------|-----|
 | Wire format | JSON-RPC 2.0 | JSON-RPC 2.0 / gRPC | REST JSON | JSON-RPC 2.0 (MCP-compatible) |
 | Primitive count | Tools + Resources + Prompts + Sampling + Elicitation + Tasks | Tasks + Messages + Skills | Functions + Responses | 12 core (4 methods + 8 notifications) + 17 kernel tools + 12 metadata |
-| Extension mechanism | Add servers | Agent Card | API updates | 12 independently negotiable extensions |
+| Extension mechanism | Add servers | Agent Card | API updates | 13 independently negotiable extensions |
 | Layer separation | None (flat) | None (flat) | None | 4-layer (Metadata/Notifications/Methods/Tools) |
 | Transport | stdio, Streamable HTTP | HTTP(S), SSE, gRPC, Webhooks | HTTPS REST | MCP inherited + WebSocket designed |
 
@@ -169,7 +169,7 @@ Layer 1: Metadata Extensions (0 new methods)
 | Reliability (10) | 5 | 6 | 8 | **9** | MCP: no delivery guarantee mechanisms. A2A: task state machine + webhooks. OpenAI: high reliability via proprietary infra. MGP: _mgp.seq + replay + retry + dedup, -1 for JSON-RPC constraint |
 | Tool Management (15) | 6 | 3 | 7 | **15** | MCP: static tools/list only. A2A: no tool concept (skills). OpenAI: strict mode + built-in tools. MGP: dynamic discovery + autonomous generation + 99% context reduction = full marks |
 | Interoperability (10) | **10** | 7 | 4 | 8 | MCP: AAIF, 97M+ downloads, universal adoption. A2A: MCP complement, 150+ orgs. OpenAI: proprietary. MGP: strict MCP superset + staged migration path, -2 for no independent ecosystem |
-| Production (10) | 7 | 2 | **10** | 2 | MCP: 10K+ servers, security issues. A2A: rare production deploys. OpenAI: millions of developers. MGP: spec-complete 30% implemented, no production deployment |
+| Production (10) | 7 | 2 | **10** | 2 | MCP: 10K+ servers, security issues. A2A: rare production deploys. OpenAI: millions of developers. MGP: Tier 1-4 implemented (21 kernel tools), no production deployment |
 | Spec Quality (5) | 4 | 3 | 3 | **5** | MCP: good but distributed. A2A: evolving. OpenAI: API docs (no formal spec). MGP: 3,862 lines, version history, cross-reference validated |
 | Innovation (5) | 3 | 3 | 2 | **5** | MCP: Tasks is sole innovation. A2A: Agent Cards. OpenAI: strict mode. MGP: dynamic discovery, autonomous generation, selective minimalism, OS isolation integration |
 | **Total** | **61** | **51** | **53** | **86** | |
@@ -251,7 +251,7 @@ Features that exist in NO other surveyed protocol:
 | **No ecosystem** | No third-party servers/SDKs/tools | MCP strict superset = existing MCP ecosystem usable |
 | **JSON-RPC asymmetry** | Server→Kernel method calls impossible | Compensation mechanisms cover practical cases (§20 for future eval) |
 | **Async tasks undefined** | No MCP Tasks-equivalent primitive | Achievable via §19 application patterns (not protocol-level) |
-| **~30% implemented** | Gap between spec and reality | Staged implementation (Tier 1→4) |
+| **Tier 1-4 implemented, no production deployment** | Spec-implementation gap closed, production gap remains | ClotoCore as reference implementation |
 
 ---
 

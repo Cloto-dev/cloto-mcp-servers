@@ -23,6 +23,7 @@ Extracted from the ClotoCore monorepo at commit `f9ea920`.
 | `vision.gaze_webcam` | Vision | Webcam gaze tracking |
 | `vision.capture` | Vision | Image capture with Ollama + OCR |
 | `voice.stt` | Voice | Speech-to-text (Whisper) |
+| `output.avatar` | Output | VRM expression, idle behavior, and VOICEVOX TTS (Rust) |
 
 ## Setup
 

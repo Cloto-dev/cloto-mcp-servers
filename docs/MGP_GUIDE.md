@@ -184,7 +184,7 @@ Compliance badges: `[MGP Tier 1]` `[MGP Tier 2]` `[MGP Tier 3]` `[MGP Tier 4]`
 | Phase | Deliverable | Status |
 |-------|-----------|--------|
 | Phase 0 | MGP Specification (v0.6.0-draft) | Draft complete |
-| — | ClotoCore Tier 1-4 Implementation (20 kernel tools, 13 extensions) | **Complete** |
+| — | ClotoCore Tier 1-4 Implementation (21 kernel tools, 13 extensions) | **Complete** |
 | Phase 1 | Python SDK (Tier 1-2) | Concept |
 | Phase 2 | TypeScript SDK (Tier 1-2) | Concept |
 | Phase 3 | Validation Tool | Concept |
@@ -208,7 +208,7 @@ Compliance badges: `[MGP Tier 1]` `[MGP Tier 2]` `[MGP Tier 3]` `[MGP Tier 4]`
 | 0.5.1-draft | 2026-02-28 | Document consolidation: merged MGP_PATTERNS.md, MGP_ADOPTION.md, MGP_REVIEW_RESPONSE.md into single specification |
 | 0.5.2-draft | 2026-02-28 | Second review response: sequential section numbering (§17-19), `notifications/mgp.event` added to Layer 2, kernel tool visibility rules (§16.8), §14 Layer classification, MCP comparison compressed |
 | 0.6.0-draft | 2026-03-06 | Transport layer analysis (see §18.4) + structural audit & architectural revision (see §18.5) |
-| 0.6.0-impl | 2026-03-07 | ClotoCore Tier 1-4 implementation complete: 20 kernel tools, 13 extensions, bug-182 to bug-226 fixed. New modules: `mcp_mgp.rs`, `mcp_lifecycle.rs`, `mcp_streaming.rs`, `mcp_events.rs`, `mcp_discovery.rs`, `mcp_tool_discovery.rs` |
+| 0.6.0-impl | 2026-03-07 | ClotoCore Tier 1-4 implementation complete: 21 kernel tools, 13 extensions, bug-182 to bug-226 fixed. New modules: `mcp_mgp.rs`, `mcp_lifecycle.rs`, `mcp_streaming.rs`, `mcp_events.rs`, `mcp_discovery.rs`, `mcp_tool_discovery.rs` |
 
 ### 18.2 Expert Review Response (0.3.0 → 0.4.0)
 

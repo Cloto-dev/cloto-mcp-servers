@@ -45,7 +45,7 @@ Consumed via `mcp.toml`'s `[paths].servers` with `${servers}/terminal/server.py`
 
 - Commit messages in English
 - Git author: `ClotoCore Project <ClotoCore@proton.me>`
-- Do NOT push without explicit user permission
+- Do NOT push without explicit user permission — commit is allowed, but `git push` requires a separate explicit instruction (e.g. "push", "pushして"). Never bundle push into a commit command.
 
 ## Prohibited
 
