@@ -86,15 +86,15 @@ registry = ToolRegistry("cloto-mcp-cron")
 
 @registry.tool(
     "create_cron_job",
-    "Create a scheduled CRON job for the current agent. "
-    "The job will automatically send the specified message to the agent "
+    "Create a scheduled CRON job. "
+    "The job will automatically send the specified message to the target agent "
     "on the defined schedule.",
     {
         "type": "object",
         "properties": {
-            "agent_id": {
+            "target_agent_id": {
                 "type": "string",
-                "description": "The target agent ID that will receive and process the scheduled message. Use mgp.discovery.list to find available agent IDs. This does NOT have to be the calling agent — you can schedule jobs for other agents.",
+                "description": "The target agent ID that will receive and process the scheduled message. Use mgp.discovery.list to find available agent IDs. This does NOT have to be the calling agent — you can schedule jobs for any agent.",
             },
             "name": {
                 "type": "string",
@@ -163,18 +163,18 @@ registry = ToolRegistry("cloto-mcp-cron")
                 "description": ("User display name for 'user' source type. Required when source_type='user'."),
             },
         },
-        "required": ["agent_id", "name", "schedule_type", "schedule_value", "message"],
+        "required": ["target_agent_id", "name", "schedule_type", "schedule_value", "message"],
     },
 )
 @_wrap_http_error
 async def do_create_cron_job(args: dict) -> dict:
     """POST /api/cron/jobs"""
-    agent_id = args.get("agent_id", "")
-    if not agent_id:
-        return {"error": "agent_id is required"}
+    target_agent_id = args.get("target_agent_id", "")
+    if not target_agent_id:
+        return {"error": "target_agent_id is required"}
 
     payload = {
-        "agent_id": agent_id,
+        "agent_id": target_agent_id,
         "name": args.get("name", ""),
         "schedule_type": args.get("schedule_type", ""),
         "schedule_value": args.get("schedule_value", ""),
