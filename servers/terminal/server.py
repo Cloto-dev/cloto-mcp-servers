@@ -34,24 +34,63 @@ if ALLOWED_COMMANDS_STR:
 # ============================================================
 
 BLOCKED_PATTERNS = [
+    # ── Linux: filesystem destruction ──
     "rm -rf /",
     "rm -fr /",
+    "/bin/rm -rf",
+    "/usr/bin/rm -rf",
+    "shred ",
+    "wipefs",
+    "truncate -s 0 /",
+    "find / -delete",
+    "find / -exec rm",
+    # ── Linux: disk / partition ──
     "mkfs",
     "dd if=/dev",
     ":(){ :|:& };:",
     "> /dev/sda",
+    "lvcreate",
+    "lvremove",
+    "vgremove",
+    "pvremove",
+    # ── Linux: system control ──
+    # Note: "shutdown" and "reboot" are pre-existing and match as substrings.
+    # These are acceptable because benign commands rarely contain these words.
     "shutdown",
     "reboot",
     "init 0",
     "init 6",
-    "chmod -r 777 /",
-    "chown -r",
+    "telinit ",
+    "systemctl poweroff",
+    "systemctl halt",
+    "systemctl reboot",
+    # ── Linux: privilege escalation ──
     "sudo ",
     "su ",
     "su\t",
     "doas ",
-    "/bin/rm -rf",
-    "/usr/bin/rm -rf",
+    "pkexec ",
+    "chmod -r 777 /",
+    "chmod u+s",
+    "chown -r",
+    # ── Linux: kernel modules ──
+    "insmod ",
+    "rmmod ",
+    "modprobe ",
+    "sysctl -w",
+    # ── Linux: user / auth (command-start patterns checked separately) ──
+    "useradd ",
+    "userdel ",
+    "usermod ",
+    "chpasswd",
+    # ── Linux: firewall ──
+    "iptables -f",
+    "iptables --flush",
+    "ufw disable",
+    "nft flush",
+    # ── Linux: cron ──
+    "crontab -r",
+    # ── Code execution (anti-injection) ──
     "python -c",
     "python2 -c",
     "python3 -c",
@@ -63,20 +102,66 @@ BLOCKED_PATTERNS = [
     "nc -e",
     "ncat -e",
     "socat exec:",
-    "shred ",
-    "wipefs",
+    # ── Pipe-to-shell (remote code execution) ──
+    "| bash",
+    "| sh",
+    "| zsh",
+    "| fish",
+    "| powershell",
+    "| pwsh",
+    "| cmd",
+    # ── Windows destructive ──
+    "format-volume",
+    "clear-disk",
+    "remove-item -recurse -force c:",
+    "remove-item -recurse -force c:\\",
+    "rd /s /q c:",
+    "rd /s /q c:\\",
+    "del /s /q c:",
+    "del /s /q c:\\",
+    "reg delete hklm",
+    "reg delete hkcu",
+    "bcdedit /delete",
+    "bcdedit /set",
+    "cipher /w:c:",
+    "diskpart",
+    "sfc /scannow",
+    "dism /online /cleanup-image",
 ]
 
+# Pipe (|) is intentionally NOT blocked: it is a legitimate shell operation.
+# The command approval gate in the kernel is the security boundary.
+# Dangerous pipe targets are covered by BLOCKED_PATTERNS above.
 BLOCKED_METACHAR_PATTERNS = [
     "$(",
     "`",
-    "|",
     ";",
     "&&",
     "||",
     ">",
     "<",
 ]
+
+# Commands blocked by first word (avoids false positives from substring matching).
+# e.g. "halt" would falsely match "asphalt"; "passwd" would match "cat /etc/passwd".
+BLOCKED_FIRST_WORD = {
+    "halt",
+    "poweroff",
+    "passwd",
+    "fdisk",
+    "gdisk",
+    "parted",
+    "cfdisk",
+    "sfdisk",
+}
+
+
+_SANDBOX_PREFIX = "[MGP Sandbox] "
+_SANDBOX_HINT = " If you need this operation, use ask_agent to delegate to an agent with appropriate permissions."
+
+
+def _sandbox_error(reason: str) -> ValueError:
+    return ValueError(f"{_SANDBOX_PREFIX}{reason}.{_SANDBOX_HINT}")
 
 
 def validate_command(command: str) -> None:
@@ -86,23 +171,28 @@ def validate_command(command: str) -> None:
     the same string that is validated is also the one that gets executed.
     """
     if not command.strip():
-        raise ValueError("Empty command is not allowed")
+        raise _sandbox_error("Empty command is not allowed")
 
     # Block embedded newlines/carriage returns and Unicode line separators
     if "\n" in command or "\r" in command or "\u2028" in command or "\u2029" in command:
-        raise ValueError("Command contains embedded newline or line separator (potential injection)")
+        raise _sandbox_error("Command contains embedded newline or line separator (potential injection)")
 
     lower = command.lower()
 
     # Block shell metacharacters
     for meta in BLOCKED_METACHAR_PATTERNS:
         if meta in lower:
-            raise ValueError(f"Command contains blocked shell metacharacter: '{meta}'")
+            raise _sandbox_error(f"Blocked shell metacharacter '{meta}' — use simple commands without chaining")
 
     # Check for blocked patterns
     for pattern in BLOCKED_PATTERNS:
         if pattern in lower:
-            raise ValueError(f"Command contains blocked pattern: '{pattern}'")
+            raise _sandbox_error(f"Blocked dangerous pattern '{pattern}'")
+
+    # Block commands by first word (prevents false positives from substring match)
+    first_word = lower.split()[0] if lower.split() else ""
+    if first_word in BLOCKED_FIRST_WORD:
+        raise _sandbox_error(f"Command '{first_word}' is a restricted system operation")
 
     # Block rm with both -r and -f flags
     normalized = " ".join(lower.split())
@@ -111,13 +201,15 @@ def validate_command(command: str) -> None:
         has_recursive = any(t.startswith("-") and not t.startswith("--") and ("r" in t or "R" in t) for t in tokens)
         has_force = any(t.startswith("-") and not t.startswith("--") and "f" in t for t in tokens)
         if has_recursive and has_force:
-            raise ValueError("Command contains dangerous rm flags (-r and -f)")
+            raise _sandbox_error("Dangerous rm flags (-r and -f combined) are not allowed")
 
     # If an allowlist is configured, check the first word
     if ALLOWED_COMMANDS is not None:
         first_word = command.split()[0] if command.split() else ""
         if first_word not in ALLOWED_COMMANDS:
-            raise ValueError(f"Command '{first_word}' is not in the allowlist. Allowed: {ALLOWED_COMMANDS}")
+            raise _sandbox_error(
+                f"Command '{first_word}' is not in the allowlist (allowed: {', '.join(ALLOWED_COMMANDS)})"
+            )
 
 
 def safe_truncate(s: str, max_bytes: int) -> str:
