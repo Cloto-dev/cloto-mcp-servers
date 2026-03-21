@@ -94,7 +94,7 @@ registry = ToolRegistry("cloto-mcp-cron")
         "properties": {
             "agent_id": {
                 "type": "string",
-                "description": "Agent identifier (your own agent ID)",
+                "description": "The target agent ID that will receive and process the scheduled message. Use mgp.discovery.list to find available agent IDs. This does NOT have to be the calling agent — you can schedule jobs for other agents.",
             },
             "name": {
                 "type": "string",
@@ -124,7 +124,7 @@ registry = ToolRegistry("cloto-mcp-cron")
             },
             "engine_id": {
                 "type": "string",
-                "description": "Optional: override the LLM engine (e.g. 'mind.deepseek'). Uses agent default if omitted.",
+                "description": "Override the LLM engine used when this job fires (e.g., 'mind.deepseek'). If omitted, the target agent's default engine is used.",
             },
             "max_iterations": {
                 "type": "integer",
