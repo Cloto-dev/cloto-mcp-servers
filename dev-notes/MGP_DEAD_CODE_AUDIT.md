@@ -1,7 +1,7 @@
 # MGP Dead Code Audit
 
 **Date**: 2026-03-08
-**Scope**: MGP (Model General Protocol) Tier 1-4 implementation
+**Scope**: MGP (Multi-Agent Gateway Protocol) Tier 1-4 implementation
 **Base Version**: v0.6.0-beta.3
 **Method**: Static analysis (grep cross-reference of all definitions vs. usages) + `cargo check`
 **Status**: **RESOLVED** — All 37 items integrated or removed. Zero `dead_code` warnings.

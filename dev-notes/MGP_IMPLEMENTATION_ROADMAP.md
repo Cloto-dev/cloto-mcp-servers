@@ -7,7 +7,7 @@
 
 ## Overview
 
-This document defines the implementation order for the MGP (Model General Protocol)
+This document defines the implementation order for the MGP (Multi-Agent Gateway Protocol)
 in ClotoCore. MGP is the most significant architectural change in the project —
 implementation must be cautious and incremental.
 
