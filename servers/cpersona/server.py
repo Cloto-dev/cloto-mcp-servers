@@ -909,85 +909,93 @@ async def do_update_profile(agent_id: str, history: list[dict]) -> dict:
     return {"ok": True, "profiles_updated": 1}
 
 
-async def do_archive_episode(agent_id: str, history: list[dict]) -> dict:
-    """Summarize conversation via LLM and archive as episode with keywords + embedding."""
+async def do_archive_episode(agent_id: str, history: list[dict], summary: str = "", keywords: str = "") -> dict:
+    """Summarize conversation via LLM and archive as episode with keywords + embedding.
+
+    When `summary` and/or `keywords` are pre-computed (e.g., by a Claude Code
+    sub-agent), the corresponding LLM proxy call is skipped. This enables
+    cost-efficient summarization via cheaper models (Sonnet/Haiku) in
+    environments without a kernel LLM proxy.
+    """
     db = await get_db()
 
-    if not history:
+    if not history and not summary:
         return {"ok": True, "episode_id": None}
 
-    conversation = _format_history(history)
-    if not conversation.strip():
-        return {"ok": True, "episode_id": None}
+    if not summary:
+        conversation = _format_history(history)
+        if not conversation.strip():
+            return {"ok": True, "episode_id": None}
 
-    # LLM-driven summarization
-    summary_prompt = (
-        "Summarize the following conversation concisely (800-1200 characters).\n"
-        "Preserve proper nouns, dates, decisions, and key technical details.\n\n"
-        f"{conversation}"
-    )
-    summary = await call_llm_proxy(summary_prompt)
-
-    if summary is None:
-        # LLM unavailable — fallback to simple concatenation
-        lines = []
-        for msg in history:
-            content = msg.get("content", "")
-            if content:
-                source = msg.get("source", {})
-                if isinstance(source, str):
-                    source = _try_parse_json(source)
-                speaker = "User" if isinstance(source, dict) and ("User" in source or "user" in source) else "Agent"
-                lines.append(f"[{speaker}] {content}")
-        if len(lines) <= 5:
-            summary = "\n".join(lines)
-        else:
-            summary = "\n".join(lines[:2] + [f"... ({len(lines) - 4} messages) ..."] + lines[-2:])
-
-    # LLM-driven keyword extraction
-    keyword_prompt = (
-        "Extract 5-10 search keywords from the following summary.\n"
-        "Choose words suitable for full-text search (FTS5). Output space-separated keywords only.\n\n"
-        f"{summary}"
-    )
-    keywords_result = await call_llm_proxy(keyword_prompt)
-
-    if keywords_result is None:
-        # Fallback: word frequency
-        word_freq: dict[str, int] = {}
-        for msg in history:
-            for word in re.findall(r"\b\w{3,}\b", msg.get("content", "").lower()):
-                word_freq[word] = word_freq.get(word, 0) + 1
-        stopwords = {
-            "the",
-            "and",
-            "for",
-            "that",
-            "this",
-            "with",
-            "are",
-            "was",
-            "has",
-            "have",
-            "not",
-            "but",
-            "you",
-            "your",
-            "can",
-            "will",
-            "from",
-            "they",
-            "been",
-            "more",
-        }
-        sorted_words = sorted(
-            ((w, c) for w, c in word_freq.items() if w not in stopwords),
-            key=lambda x: x[1],
-            reverse=True,
+        # LLM-driven summarization
+        summary_prompt = (
+            "Summarize the following conversation concisely (800-1200 characters).\n"
+            "Preserve proper nouns, dates, decisions, and key technical details.\n\n"
+            f"{conversation}"
         )
-        keywords = " ".join(w for w, _ in sorted_words[:10])
-    else:
-        keywords = keywords_result.strip()
+        summary = await call_llm_proxy(summary_prompt)
+
+        if summary is None:
+            # LLM unavailable — fallback to simple concatenation
+            lines = []
+            for msg in history:
+                content = msg.get("content", "")
+                if content:
+                    source = msg.get("source", {})
+                    if isinstance(source, str):
+                        source = _try_parse_json(source)
+                    speaker = "User" if isinstance(source, dict) and ("User" in source or "user" in source) else "Agent"
+                    lines.append(f"[{speaker}] {content}")
+            if len(lines) <= 5:
+                summary = "\n".join(lines)
+            else:
+                summary = "\n".join(lines[:2] + [f"... ({len(lines) - 4} messages) ..."] + lines[-2:])
+
+    if not keywords:
+        # LLM-driven keyword extraction
+        keyword_prompt = (
+            "Extract 5-10 search keywords from the following summary.\n"
+            "Choose words suitable for full-text search (FTS5). Output space-separated keywords only.\n\n"
+            f"{summary}"
+        )
+        keywords_result = await call_llm_proxy(keyword_prompt)
+
+        if keywords_result is None:
+            # Fallback: word frequency
+            word_freq: dict[str, int] = {}
+            for msg in history:
+                for word in re.findall(r"\b\w{3,}\b", msg.get("content", "").lower()):
+                    word_freq[word] = word_freq.get(word, 0) + 1
+            stopwords = {
+                "the",
+                "and",
+                "for",
+                "that",
+                "this",
+                "with",
+                "are",
+                "was",
+                "has",
+                "have",
+                "not",
+                "but",
+                "you",
+                "your",
+                "can",
+                "will",
+                "from",
+                "they",
+                "been",
+                "more",
+            }
+            sorted_words = sorted(
+                ((w, c) for w, c in word_freq.items() if w not in stopwords),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            keywords = " ".join(w for w, _ in sorted_words[:10])
+        else:
+            keywords = keywords_result.strip()
 
     # Timestamps
     timestamps = [msg.get("timestamp", "") for msg in history if msg.get("timestamp")]
@@ -1476,8 +1484,15 @@ async def do_update_profile_or_queue(agent_id: str, history: list) -> dict:
     return await do_update_profile(agent_id, history)
 
 
-async def do_archive_episode_or_queue(agent_id: str, history: list) -> dict:
-    """Enqueue episode archival if task queue is enabled, otherwise run synchronously."""
+async def do_archive_episode_or_queue(agent_id: str, history: list, summary: str = "", keywords: str = "") -> dict:
+    """Enqueue episode archival if task queue is enabled, otherwise run synchronously.
+
+    When summary/keywords are pre-computed, bypass the queue and store directly
+    (no LLM call needed, so queuing for retry is unnecessary).
+    """
+    if summary:
+        # Pre-computed: store directly, no LLM needed
+        return await do_archive_episode(agent_id, history, summary=summary, keywords=keywords)
     if _task_queue and TASK_QUEUE_ENABLED:
         task_id = await _task_queue.enqueue("archive_episode", agent_id, history)
         return {"ok": True, "queued": True, "task_id": task_id}
@@ -1508,21 +1523,32 @@ registry.auto_tool(
 
 registry.auto_tool(
     "archive_episode",
-    "Summarize and archive a conversation episode for searchable recall.",
+    "Summarize and archive a conversation episode for searchable recall. "
+    "When summary/keywords are provided, LLM summarization is skipped (use for pre-computed summaries from sub-agents).",
     {
         "type": "object",
         "properties": {
             "agent_id": {"type": "string", "description": "Agent identifier"},
             "history": {
                 "type": "array",
-                "description": "Conversation messages to archive",
+                "description": "Conversation messages to archive (can be empty if summary is pre-computed)",
                 "items": {"type": "object"},
             },
+            "summary": {
+                "type": "string",
+                "description": "Pre-computed summary (skips LLM summarization when provided)",
+                "default": "",
+            },
+            "keywords": {
+                "type": "string",
+                "description": "Pre-computed space-separated keywords (skips LLM extraction when provided)",
+                "default": "",
+            },
         },
-        "required": ["agent_id", "history"],
+        "required": ["agent_id"],
     },
     do_archive_episode_or_queue,
-    [("agent_id", str), ("history", list)],
+    [("agent_id", str), ("history", list, []), ("summary", str, ""), ("keywords", str, "")],
 )
 
 registry.auto_tool(
