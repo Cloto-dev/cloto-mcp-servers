@@ -1187,6 +1187,250 @@ async def do_delete_episode(episode_id: int, agent_id: str = "") -> dict:
     return {"ok": True, "deleted_id": episode_id}
 
 
+async def do_export_memories(agent_id: str, output_path: str, include_embeddings: bool = False) -> dict:
+    """Export memories, episodes, and profiles to a JSONL file.
+
+    Each line is a self-contained JSON object with a `_type` field:
+    header, memory, episode, or profile.
+    Embeddings are excluded by default (model-dependent BLOBs).
+    """
+    db = await get_db()
+
+    agent_filter = " WHERE agent_id = ?" if agent_id else ""
+    agent_params: tuple = (agent_id,) if agent_id else ()
+
+    # Pre-count for header
+    mem_count = (await db.execute_fetchall(f"SELECT COUNT(*) FROM memories{agent_filter}", agent_params))[0][0]
+    ep_count = (await db.execute_fetchall(f"SELECT COUNT(*) FROM episodes{agent_filter}", agent_params))[0][0]
+    prof_count = (await db.execute_fetchall(f"SELECT COUNT(*) FROM profiles{agent_filter}", agent_params))[0][0]
+
+    # Ensure output directory exists
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    exported_memories = 0
+    exported_episodes = 0
+    exported_profiles = 0
+
+    import base64
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        # Header line
+        header = {
+            "_type": "header",
+            "version": "cpersona-export/1.0",
+            "agent_id": agent_id,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "memory_count": mem_count,
+            "episode_count": ep_count,
+            "has_profile": prof_count > 0,
+        }
+        f.write(json.dumps(header, ensure_ascii=False) + "\n")
+
+        # Memories
+        rows = await db.execute_fetchall(
+            "SELECT id, agent_id, msg_id, content, source, timestamp, metadata, embedding, created_at"
+            f" FROM memories{agent_filter} ORDER BY id",
+            agent_params,
+        )
+        for row in rows:
+            record: dict = {
+                "_type": "memory",
+                "id": row[0],
+                "agent_id": row[1],
+                "msg_id": row[2],
+                "content": row[3],
+                "source": _try_parse_json(row[4]) if row[4] else {},
+                "timestamp": row[5],
+                "metadata": _try_parse_json(row[6]) if row[6] else {},
+                "created_at": row[8],
+            }
+            if include_embeddings and row[7]:
+                record["embedding_b64"] = base64.b64encode(row[7]).decode("ascii")
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            exported_memories += 1
+
+        # Episodes
+        rows = await db.execute_fetchall(
+            "SELECT id, agent_id, summary, keywords, start_time, end_time, embedding, created_at"
+            f" FROM episodes{agent_filter} ORDER BY id",
+            agent_params,
+        )
+        for row in rows:
+            record = {
+                "_type": "episode",
+                "id": row[0],
+                "agent_id": row[1],
+                "summary": row[2],
+                "keywords": row[3],
+                "start_time": row[4],
+                "end_time": row[5],
+                "created_at": row[7],
+            }
+            if include_embeddings and row[6]:
+                record["embedding_b64"] = base64.b64encode(row[6]).decode("ascii")
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            exported_episodes += 1
+
+        # Profiles
+        rows = await db.execute_fetchall(
+            f"SELECT agent_id, user_id, content, updated_at FROM profiles{agent_filter} ORDER BY agent_id",
+            agent_params,
+        )
+        for row in rows:
+            record = {
+                "_type": "profile",
+                "agent_id": row[0],
+                "user_id": row[1],
+                "content": row[2],
+                "updated_at": row[3],
+            }
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            exported_profiles += 1
+
+    return {
+        "ok": True,
+        "path": output_path,
+        "memories": exported_memories,
+        "episodes": exported_episodes,
+        "profiles": exported_profiles,
+    }
+
+
+async def do_import_memories(input_path: str, target_agent_id: str = "", dry_run: bool = False) -> dict:
+    """Import memories, episodes, and profiles from a JSONL file.
+
+    - msg_id deduplication: memories with an existing msg_id are skipped (idempotent).
+    - Embeddings are NOT imported (re-compute via store or embedding server).
+    - Profiles are UPSERTed (overwrite on conflict).
+    - Episode FTS5 triggers fire automatically on INSERT.
+    """
+    if not os.path.exists(input_path):
+        return {"error": f"File not found: {input_path}"}
+
+    db = await get_db()
+
+    imported_memories = 0
+    skipped_memories = 0
+    imported_episodes = 0
+    profile_updated = False
+    errors: list[str] = []
+
+    with open(input_path, encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as e:
+                errors.append(f"Line {line_num}: invalid JSON: {e}")
+                continue
+
+            rtype = record.get("_type", "")
+
+            if rtype == "header":
+                continue
+
+            elif rtype == "memory":
+                aid = target_agent_id or record.get("agent_id", "")
+                if not aid:
+                    errors.append(f"Line {line_num}: memory missing agent_id")
+                    continue
+
+                content = record.get("content", "")
+                if not content:
+                    skipped_memories += 1
+                    continue
+
+                msg_id = record.get("msg_id", "")
+
+                # Dedup check (even in dry_run, count as skip for accurate preview)
+                if msg_id:
+                    existing = await db.execute_fetchall(
+                        "SELECT id FROM memories WHERE agent_id = ? AND msg_id = ? LIMIT 1",
+                        (aid, msg_id),
+                    )
+                    if existing:
+                        skipped_memories += 1
+                        continue
+
+                if not dry_run:
+                    source = json.dumps(record.get("source", {}))
+                    timestamp = record.get("timestamp", "")
+                    metadata = json.dumps(record.get("metadata", {}))
+                    await db.execute(
+                        "INSERT INTO memories (agent_id, msg_id, content, source, timestamp, metadata)"
+                        " VALUES (?, ?, ?, ?, ?, ?)",
+                        (aid, msg_id, content, source, timestamp, metadata),
+                    )
+                imported_memories += 1
+
+            elif rtype == "episode":
+                aid = target_agent_id or record.get("agent_id", "")
+                if not aid:
+                    errors.append(f"Line {line_num}: episode missing agent_id")
+                    continue
+
+                summary = record.get("summary", "")
+                if not summary:
+                    continue
+
+                if not dry_run:
+                    keywords = record.get("keywords", "")
+                    start_time = record.get("start_time")
+                    end_time = record.get("end_time")
+                    await db.execute(
+                        "INSERT INTO episodes (agent_id, summary, keywords, start_time, end_time)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (aid, summary, keywords, start_time, end_time),
+                    )
+                imported_episodes += 1
+
+            elif rtype == "profile":
+                aid = target_agent_id or record.get("agent_id", "")
+                if not aid:
+                    errors.append(f"Line {line_num}: profile missing agent_id")
+                    continue
+
+                content = record.get("content", "")
+                if not content:
+                    continue
+
+                if not dry_run:
+                    user_id = record.get("user_id", "")
+                    await db.execute(
+                        "INSERT INTO profiles (agent_id, user_id, content, updated_at)"
+                        " VALUES (?, ?, ?, datetime('now'))"
+                        " ON CONFLICT(agent_id, user_id) DO UPDATE SET"
+                        "   content = excluded.content,"
+                        "   updated_at = excluded.updated_at",
+                        (aid, user_id, content),
+                    )
+                profile_updated = True
+
+            else:
+                if rtype:
+                    errors.append(f"Line {line_num}: unknown type '{rtype}'")
+
+    if not dry_run:
+        await db.commit()
+
+    result: dict = {
+        "ok": True,
+        "dry_run": dry_run,
+        "imported_memories": imported_memories,
+        "skipped_memories": skipped_memories,
+        "imported_episodes": imported_episodes,
+        "profile_updated": profile_updated,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
 # --- Tool registrations (must be after all do_* definitions) ---
 
 registry.auto_tool(
@@ -1364,6 +1608,59 @@ registry.auto_tool(
     },
     do_get_queue_status,
     [],
+)
+
+registry.auto_tool(
+    "export_memories",
+    "Export memories, episodes, and profiles to a JSONL file for backup or portability.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {
+                "type": "string",
+                "description": "Agent identifier (empty string to export all agents)",
+            },
+            "output_path": {
+                "type": "string",
+                "description": "File path for the JSONL output",
+            },
+            "include_embeddings": {
+                "type": "boolean",
+                "description": "Include embedding BLOBs as base64 (default false, usually not needed)",
+                "default": False,
+            },
+        },
+        "required": ["agent_id", "output_path"],
+    },
+    do_export_memories,
+    [("agent_id", str), ("output_path", str), ("include_embeddings", bool, False)],
+)
+
+registry.auto_tool(
+    "import_memories",
+    "Import memories, episodes, and profiles from a JSONL file. Idempotent via msg_id deduplication.",
+    {
+        "type": "object",
+        "properties": {
+            "input_path": {
+                "type": "string",
+                "description": "Path to the JSONL file to import",
+            },
+            "target_agent_id": {
+                "type": "string",
+                "description": "Remap all records to this agent ID (empty to use original agent_id from file)",
+                "default": "",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "Count records without writing to DB (preview mode)",
+                "default": False,
+            },
+        },
+        "required": ["input_path"],
+    },
+    do_import_memories,
+    [("input_path", str), ("target_agent_id", str, ""), ("dry_run", bool, False)],
 )
 
 
