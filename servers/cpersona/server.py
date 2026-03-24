@@ -1,5 +1,5 @@
 """
-Cloto MCP Server: CPersona Memory v2.4
+Cloto MCP Server: CPersona Memory
 Persistent memory with FTS5 full-text search and pluggable vector embedding.
 Evolved from CPersona 2.2 (Rust plugin) with 2.1 (ai_karin) architecture enhancements.
 
