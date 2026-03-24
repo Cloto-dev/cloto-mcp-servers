@@ -1,5 +1,5 @@
 """
-Cloto MCP Server: CPersona Memory
+Cloto MCP Server: CPersona Memory v2.4
 Persistent memory with FTS5 full-text search and pluggable vector embedding.
 Evolved from CPersona 2.2 (Rust plugin) with 2.1 (ai_karin) architecture enhancements.
 
@@ -9,6 +9,8 @@ Phase 3: LLM-powered memory extraction (profile + episode summarization) — COM
 Phase 4: Anti-contamination — memory boundary markers, timestamp annotations,
          anti-hallucination guardrails — COMPLETE
 Phase 5: Background task queue (DB-persisted, crash-recoverable) — COMPLETE
+Phase 6: Memory portability — JSONL export/import, pre-computed summary support,
+         Claude Code integration — COMPLETE
 """
 
 import asyncio

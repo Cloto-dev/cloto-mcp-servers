@@ -1,6 +1,6 @@
 [project]
 name = "cloto-mcp-cpersona"
-version = "2.3.0"
+version = "2.4.0"
 description = "Cloto MCP Server: CPersona persistent memory with FTS5 search and anti-contamination"
 requires-python = ">=3.10"
 dependencies = [
