@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 import aiosqlite
 import httpx
 from mcp.server.stdio import stdio_server
+from mcp.types import ToolAnnotations
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
@@ -1459,6 +1460,7 @@ registry.auto_tool(
     },
     do_store,
     [("agent_id", str), ("message", dict)],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
 )
 
 registry.auto_tool(
@@ -1475,6 +1477,7 @@ registry.auto_tool(
     },
     do_recall,
     [("agent_id", str), ("query", str), ("limit", int, 10)],
+    annotations=ToolAnnotations(readOnlyHint=True),
 )
 
 
@@ -1521,6 +1524,7 @@ registry.auto_tool(
     },
     do_update_profile_or_queue,
     [("agent_id", str), ("history", list)],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
 )
 
 registry.auto_tool(
@@ -1551,6 +1555,7 @@ registry.auto_tool(
     },
     do_archive_episode_or_queue,
     [("agent_id", str), ("history", list, []), ("summary", str, ""), ("keywords", str, "")],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
 )
 
 registry.auto_tool(
@@ -1566,6 +1571,7 @@ registry.auto_tool(
     },
     do_list_memories,
     [("agent_id", str), ("limit", int, 100)],
+    annotations=ToolAnnotations(readOnlyHint=True),
 )
 
 registry.auto_tool(
@@ -1581,6 +1587,7 @@ registry.auto_tool(
     },
     do_list_episodes,
     [("agent_id", str), ("limit", int, 50)],
+    annotations=ToolAnnotations(readOnlyHint=True),
 )
 
 registry.auto_tool(
@@ -1595,6 +1602,7 @@ registry.auto_tool(
     },
     do_delete_agent_data,
     [("agent_id", str)],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),
 )
 
 registry.auto_tool(
@@ -1610,6 +1618,7 @@ registry.auto_tool(
     },
     do_delete_memory,
     [("memory_id", int), ("agent_id", str)],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),
 )
 
 registry.auto_tool(
@@ -1625,6 +1634,7 @@ registry.auto_tool(
     },
     do_delete_episode,
     [("episode_id", int), ("agent_id", str)],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),
 )
 
 registry.auto_tool(
@@ -1636,6 +1646,7 @@ registry.auto_tool(
     },
     do_get_queue_status,
     [],
+    annotations=ToolAnnotations(readOnlyHint=True),
 )
 
 registry.auto_tool(
@@ -1662,6 +1673,7 @@ registry.auto_tool(
     },
     do_export_memories,
     [("agent_id", str), ("output_path", str), ("include_embeddings", bool, False)],
+    annotations=ToolAnnotations(readOnlyHint=True),
 )
 
 registry.auto_tool(
@@ -1689,7 +1701,90 @@ registry.auto_tool(
     },
     do_import_memories,
     [("input_path", str), ("target_agent_id", str, ""), ("dry_run", bool, False)],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
 )
+
+
+async def _run_http_server():
+    """Run CPersona as a Streamable HTTP MCP server with Bearer token auth."""
+    import contextlib
+    from collections.abc import AsyncIterator
+
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.middleware.cors import CORSMiddleware
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+    from starlette.routing import Mount
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+    auth_token = os.environ.get("CPERSONA_AUTH_TOKEN", "")
+    if not auth_token:
+        raise RuntimeError("CPERSONA_AUTH_TOKEN is required for streamable-http transport")
+
+    session_manager = StreamableHTTPSessionManager(
+        app=registry.server,
+        stateless=True,
+    )
+
+    async def mcp_endpoint(scope, receive, send):
+        await session_manager.handle_request(scope, receive, send)
+
+    class BearerTokenMiddleware:
+        """Simple Bearer token authentication middleware."""
+
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
+            request = Request(scope, receive)
+            # Allow CORS preflight without auth
+            if request.method == "OPTIONS":
+                await self.app(scope, receive, send)
+                return
+            header = request.headers.get("authorization", "")
+            if not header.startswith("Bearer ") or header[7:] != auth_token:
+                response = JSONResponse(
+                    {"error": "unauthorized"}, status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+                await response(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        async with session_manager.run():
+            logger.info("CPersona Streamable HTTP server ready")
+            yield
+
+    app = Starlette(
+        routes=[Mount("/mcp", app=mcp_endpoint), Mount("/", app=mcp_endpoint)],
+        middleware=[
+            Middleware(
+                CORSMiddleware,
+                allow_origins=["https://claude.ai", "https://www.claude.ai"],
+                allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+                allow_headers=["Authorization", "Content-Type",
+                               "Mcp-Session-Id", "Mcp-Protocol-Version", "Last-Event-Id"],
+                expose_headers=["Mcp-Session-Id"],
+            ),
+            Middleware(BearerTokenMiddleware),
+        ],
+        lifespan=lifespan,
+    )
+
+    host = os.environ.get("CPERSONA_HTTP_HOST", "0.0.0.0")
+    port = int(os.environ.get("CPERSONA_HTTP_PORT", "8402"))
+    logger.info("Starting Streamable HTTP on %s:%d", host, port)
+
+    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
 
 
 async def main():
@@ -1725,8 +1820,14 @@ async def main():
         logger.info("Task queue disabled")
 
     try:
-        async with stdio_server() as (read_stream, write_stream):
-            await registry.server.run(read_stream, write_stream, registry.server.create_initialization_options())
+        transport = os.environ.get("CPERSONA_TRANSPORT", "stdio")
+        if transport == "stdio":
+            async with stdio_server() as (read_stream, write_stream):
+                await registry.server.run(read_stream, write_stream, registry.server.create_initialization_options())
+        elif transport == "streamable-http":
+            await _run_http_server()
+        else:
+            raise ValueError(f"Unknown transport: {transport}")
     finally:
         if _task_queue:
             await _task_queue.stop()

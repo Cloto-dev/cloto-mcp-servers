@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import TextContent, Tool, ToolAnnotations
 
 from common.validation import validate_dict, validate_int, validate_list, validate_str
 
@@ -43,7 +43,7 @@ class ToolRegistry:
 
         return decorator
 
-    def auto_tool(self, name: str, description: str, schema: dict, handler: Callable, params: list[tuple]):
+    def auto_tool(self, name: str, description: str, schema: dict, handler: Callable, params: list[tuple], annotations: ToolAnnotations | None = None):
         """Register a tool with auto-validated parameter extraction.
 
         Each entry in *params* is ``(key, type)`` or ``(key, type, default)``.
@@ -63,7 +63,7 @@ class ToolRegistry:
                     args.append(validator(arguments, key))
             return await handler(*args)
 
-        self._tools.append(Tool(name=name, description=description, inputSchema=schema))
+        self._tools.append(Tool(name=name, description=description, inputSchema=schema, annotations=annotations))
         self._handlers[name] = _handler
 
     def _bind(self):
