@@ -295,6 +295,29 @@
       "trust_level": "core",
       "auto_restart": false,
       "icon": "user"
+    },
+    {
+      "id": "io.discord",
+      "name": "Discord Bridge",
+      "description": "Bidirectional Discord communication — receive messages via MGP events, send via MCP tools",
+      "category": "io",
+      "version": "0.1.0",
+      "directory": "discord",
+      "runtime": "rust",
+      "bin_name": "mgp-discord",
+      "dependencies": [],
+      "env_vars": [
+        { "key": "DISCORD_BOT_TOKEN", "default": "", "description": "Discord bot token (required)" }
+      ],
+      "optional_env_vars": [
+        { "key": "ALLOWED_CHANNEL_IDS", "default": "", "description": "Comma-separated channel IDs to monitor (empty = all)" },
+        { "key": "ALLOWED_GUILD_IDS", "default": "", "description": "Comma-separated guild IDs (empty = all)" },
+        { "key": "BLOCK_EVERYONE", "default": "true", "description": "Block @everyone/@here in outgoing messages" }
+      ],
+      "tags": ["discord", "bridge", "mgp", "io"],
+      "trust_level": "standard",
+      "auto_restart": true,
+      "icon": "message-circle"
     }
   ]
 }

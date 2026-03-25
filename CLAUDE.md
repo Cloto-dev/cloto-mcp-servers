@@ -22,6 +22,13 @@
 - Format check: `cd servers/avatar && cargo fmt -- --check`
 - Format: `cd servers/avatar && cargo fmt`
 
+## Rust Server Commands (servers/discord/)
+
+- Build: `cd servers/discord && cargo build`
+- Lint: `cd servers/discord && cargo clippy -- -D warnings`
+- Format check: `cd servers/discord && cargo fmt -- --check`
+- Format: `cd servers/discord && cargo fmt`
+
 ## Bug Verification
 
 - Source of truth: `qa/issue-registry.json`

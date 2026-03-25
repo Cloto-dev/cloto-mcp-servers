@@ -1,0 +1,123 @@
+//! Serenity EventHandler → tokio mpsc bridge.
+//!
+//! Converts Discord Gateway events into `DiscordEvent` structs and sends them
+//! to the main loop via an unbounded channel. The main loop then emits MGP
+//! notifications on stdout.
+
+use serenity::all as serenity;
+use serenity::async_trait;
+use tokio::sync::mpsc;
+
+/// Events forwarded from Discord Gateway to the main loop.
+#[derive(Debug)]
+pub enum DiscordEvent {
+    MessageCreate(Box<MessageData>),
+    Ready(ReadyData),
+}
+
+#[derive(Debug)]
+pub struct MessageData {
+    pub guild_id: Option<String>,
+    pub channel_id: String,
+    pub message_id: String,
+    pub author_id: String,
+    pub author_name: String,
+    pub author_bot: bool,
+    pub content: String,
+    pub timestamp: String,
+    pub attachments: Vec<AttachmentData>,
+    pub reference: Option<ReferenceData>,
+}
+
+#[derive(Debug)]
+pub struct AttachmentData {
+    pub url: String,
+    pub filename: String,
+    pub size: u64,
+    pub content_type: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ReferenceData {
+    pub author_name: String,
+    pub content: String,
+}
+
+#[derive(Debug)]
+pub struct ReadyData {
+    pub username: String,
+    pub guild_count: usize,
+}
+
+pub struct DiscordHandler {
+    pub event_tx: mpsc::UnboundedSender<DiscordEvent>,
+    pub allowed_channel_ids: Vec<u64>,
+}
+
+#[async_trait]
+impl serenity::EventHandler for DiscordHandler {
+    async fn message(&self, ctx: serenity::Context, msg: serenity::Message) {
+        // Skip bot messages to prevent loops
+        if msg.author.bot {
+            return;
+        }
+
+        // Channel filter
+        if !self.allowed_channel_ids.is_empty()
+            && !self.allowed_channel_ids.contains(&msg.channel_id.get())
+        {
+            return;
+        }
+
+        let reference = msg
+            .referenced_message
+            .as_ref()
+            .map(|referenced| ReferenceData {
+                author_name: referenced.author.name.clone(),
+                content: referenced.content.clone(),
+            });
+
+        let data = MessageData {
+            guild_id: msg.guild_id.map(|id| id.to_string()),
+            channel_id: msg.channel_id.to_string(),
+            message_id: msg.id.to_string(),
+            author_id: msg.author.id.to_string(),
+            author_name: msg
+                .author_nick(&ctx.http)
+                .await
+                .unwrap_or_else(|| msg.author.name.clone()),
+            author_bot: msg.author.bot,
+            content: msg.content.clone(),
+            timestamp: msg.timestamp.to_string(),
+            attachments: msg
+                .attachments
+                .iter()
+                .map(|a| AttachmentData {
+                    url: a.url.clone(),
+                    filename: a.filename.clone(),
+                    size: a.size as u64,
+                    content_type: a.content_type.clone(),
+                })
+                .collect(),
+            reference,
+        };
+
+        let _ = self
+            .event_tx
+            .send(DiscordEvent::MessageCreate(Box::new(data)));
+    }
+
+    async fn ready(&self, _ctx: serenity::Context, ready: serenity::Ready) {
+        tracing::info!(
+            "Discord connected as {} ({})",
+            ready.user.name,
+            ready.user.id
+        );
+
+        let data = ReadyData {
+            username: ready.user.name.clone(),
+            guild_count: ready.guilds.len(),
+        };
+        let _ = self.event_tx.send(DiscordEvent::Ready(data));
+    }
+}
