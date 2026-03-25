@@ -5,7 +5,7 @@ Bridges local MCP stdio transport to a remote CPersona Streamable HTTP server,
 enabling Claude Code (which only supports stdio MCP) to use a remote DB.
 
 Env vars:
-  CPERSONA_REMOTE_URL  - Remote MCP endpoint (default: http://192.168.0.198:8402/mcp)
+  CPERSONA_REMOTE_URL  - Remote MCP endpoint (default: http://localhost:8402/mcp)
   CPERSONA_AUTH_TOKEN  - Bearer token for authentication (required)
 """
 
@@ -20,7 +20,7 @@ import httpx
 
 logger = logging.getLogger("cpersona-proxy")
 
-REMOTE_URL = os.environ.get("CPERSONA_REMOTE_URL", "http://192.168.0.198:8402/mcp")
+REMOTE_URL = os.environ.get("CPERSONA_REMOTE_URL", "http://localhost:8402/mcp")
 AUTH_TOKEN = os.environ.get("CPERSONA_AUTH_TOKEN", "")
 
 
