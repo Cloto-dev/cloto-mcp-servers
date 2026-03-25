@@ -1720,8 +1720,6 @@ async def _run_http_server():
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     auth_token = os.environ.get("CPERSONA_AUTH_TOKEN", "")
-    if not auth_token:
-        raise RuntimeError("CPERSONA_AUTH_TOKEN is required for streamable-http transport")
 
     session_manager = StreamableHTTPSessionManager(
         app=registry.server,
@@ -1747,13 +1745,18 @@ async def _run_http_server():
                 await self.app(scope, receive, send)
                 return
             header = request.headers.get("authorization", "")
-            if not header.startswith("Bearer ") or header[7:] != auth_token:
-                response = JSONResponse(
-                    {"error": "unauthorized"}, status_code=401,
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-                await response(scope, receive, send)
-                return
+            if auth_token and header:
+                # Validate token if both are present
+                if not header.startswith("Bearer ") or header[7:] != auth_token:
+                    response = JSONResponse(
+                        {"error": "unauthorized"}, status_code=401,
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+                    await response(scope, receive, send)
+                    return
+            elif auth_token and not header:
+                # Token configured but not provided — allow (authless for Claude web)
+                pass
             await self.app(scope, receive, send)
 
     @contextlib.asynccontextmanager
