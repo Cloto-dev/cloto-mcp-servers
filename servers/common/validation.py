@@ -4,6 +4,14 @@ All validators return a safe default on type mismatch (graceful degradation).
 """
 
 
+def validate_bool(arguments: dict, key: str, default: bool = False) -> bool:
+    """Extract a boolean value, returning *default* if missing or wrong type."""
+    val = arguments.get(key, default)
+    if not isinstance(val, bool):
+        return default
+    return val
+
+
 def validate_str(arguments: dict, key: str, default: str = "") -> str:
     """Extract a string value, returning *default* if missing or wrong type."""
     val = arguments.get(key, default)

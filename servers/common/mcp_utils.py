@@ -10,9 +10,10 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool, ToolAnnotations
 
-from common.validation import validate_dict, validate_int, validate_list, validate_str
+from common.validation import validate_bool, validate_dict, validate_int, validate_list, validate_str
 
 _VALIDATORS: dict[type, Callable] = {
+    bool: validate_bool,
     str: validate_str,
     int: validate_int,
     dict: validate_dict,
