@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+import threading
 
 import httpx
 
@@ -23,37 +24,45 @@ REMOTE_URL = os.environ.get("CPERSONA_REMOTE_URL", "http://192.168.0.198:8402/mc
 AUTH_TOKEN = os.environ.get("CPERSONA_AUTH_TOKEN", "")
 
 
-async def main():
-    if not AUTH_TOKEN:
-        logger.error("CPERSONA_AUTH_TOKEN is required")
-        sys.exit(1)
+def _read_stdin_lines(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+    """Read lines from stdin in a background thread (Windows-compatible)."""
+    try:
+        for line in sys.stdin.buffer:
+            line = line.strip()
+            if line:
+                loop.call_soon_threadsafe(queue.put_nowait, line)
+    except (EOFError, OSError):
+        pass
+    finally:
+        loop.call_soon_threadsafe(queue.put_nowait, None)
 
+
+async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s",
                         stream=sys.stderr)
     logger.info("Proxy starting: %s", REMOTE_URL)
 
     session_id: str | None = None
-    reader = asyncio.StreamReader()
-    await asyncio.get_event_loop().connect_read_pipe(
-        lambda: asyncio.StreamReaderProtocol(reader), sys.stdin.buffer
-    )
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    # Start stdin reader thread
+    reader_thread = threading.Thread(target=_read_stdin_lines, args=(queue, loop), daemon=True)
+    reader_thread.start()
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0)) as client:
         while True:
-            # Read JSON-RPC message from stdin (MCP uses newline-delimited JSON)
-            line = await reader.readline()
-            if not line:
+            line = await queue.get()
+            if line is None:
                 break
-            line = line.strip()
-            if not line:
-                continue
 
             # Forward to remote HTTP server
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
-                "Authorization": f"Bearer {AUTH_TOKEN}",
             }
+            if AUTH_TOKEN:
+                headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
             if session_id:
                 headers["Mcp-Session-Id"] = session_id
 
