@@ -16,6 +16,7 @@ pub enum DiscordEvent {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct MessageData {
     pub guild_id: Option<String>,
     pub channel_id: String,
@@ -66,6 +67,12 @@ impl serenity::EventHandler for DiscordHandler {
         if !self.allowed_channel_ids.is_empty()
             && !self.allowed_channel_ids.contains(&msg.channel_id.get())
         {
+            return;
+        }
+
+        // Only respond to messages that mention the bot
+        let bot_id = ctx.cache.current_user().id;
+        if !msg.mentions_user_id(bot_id) {
             return;
         }
 

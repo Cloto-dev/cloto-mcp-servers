@@ -16,6 +16,7 @@ pub fn tool_list() -> Vec<McpTool> {
         add_reaction_schema(),
         list_channels_schema(),
         get_history_schema(),
+        search_messages_schema(),
         edit_message_schema(),
         delete_message_schema(),
     ]
@@ -33,6 +34,7 @@ pub async fn execute(
         "add_reaction" => execute_add_reaction(args, http).await,
         "list_channels" => execute_list_channels(args, http, config).await,
         "get_history" => execute_get_history(args, http).await,
+        "search_messages" => execute_search_messages(args, http).await,
         "edit_message" => execute_edit_message(args, http, config).await,
         "delete_message" => execute_delete_message(args, http).await,
         _ => Err(format!("Unknown tool: {tool_name}")),
@@ -127,6 +129,42 @@ fn get_history_schema() -> McpTool {
                 }
             },
             "required": ["channel_id"]
+        }),
+    }
+}
+
+fn search_messages_schema() -> McpTool {
+    McpTool {
+        name: "search_messages".into(),
+        description: "Search Discord channel message history by keyword. Fetches messages and filters locally. Use for past conversation research.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "channel_id": {
+                    "type": "string",
+                    "description": "Discord channel ID to search"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search keyword (case-insensitive substring match)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of messages to scan (default: 200, max: 500)",
+                    "minimum": 1,
+                    "maximum": 500
+                },
+                "target_time": {
+                    "type": "string",
+                    "description": "ISO 8601 timestamp to search around (optional, searches recent messages by default)"
+                },
+                "sort": {
+                    "type": "string",
+                    "enum": ["desc", "asc"],
+                    "description": "Sort order: 'desc' (newest first, default) or 'asc' (oldest first)"
+                }
+            },
+            "required": ["channel_id", "query"]
         }),
     }
 }
@@ -349,6 +387,153 @@ async fn execute_get_history(
         "No messages found".to_string()
     } else {
         formatted.join("\n")
+    });
+    Ok((result, vec![]))
+}
+
+async fn execute_search_messages(
+    args: &Value,
+    http: &Arc<serenity::Http>,
+) -> Result<(Value, Vec<JsonRpcNotification>), String> {
+    let channel_id = parse_id(args, "channel_id")?;
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or("query is required")?
+        .to_lowercase();
+    let scan_limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(200)
+        .min(500) as usize;
+    let sort_asc = args
+        .get("sort")
+        .and_then(|v| v.as_str())
+        == Some("asc");
+
+    let channel = serenity::ChannelId::new(channel_id);
+    let jst_offset = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
+
+    // Determine starting point
+    let target_time = args
+        .get("target_time")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
+
+    let mut collected: Vec<serenity::Message> = Vec::new();
+
+    if let Some(time) = target_time {
+        // Search around a specific time
+        let snowflake = utils::timestamp_to_snowflake(time);
+        let anchor = serenity::MessageId::new(snowflake);
+
+        // Fetch initial batch around the target time
+        let initial = channel
+            .messages(http, serenity::GetMessages::new().around(anchor).limit(100))
+            .await
+            .map_err(|e| format!("Failed to fetch messages: {e}"))?;
+        collected.extend(initial);
+
+        // Expand outward if we need more
+        if !collected.is_empty() && collected.len() < scan_limit {
+            collected.sort_by_key(|m| m.id);
+            let mut before_cursor = collected.first().unwrap().id;
+            let mut after_cursor = collected.last().unwrap().id;
+
+            while collected.len() < scan_limit {
+                let pre_len = collected.len();
+                let batch_size = (scan_limit - collected.len()).min(100) as u8;
+
+                let older = channel
+                    .messages(http, serenity::GetMessages::new().before(before_cursor).limit(batch_size))
+                    .await
+                    .unwrap_or_default();
+                if !older.is_empty() {
+                    before_cursor = older.iter().map(|m| m.id).min().unwrap_or(before_cursor);
+                    collected.extend(older);
+                }
+
+                if collected.len() < scan_limit {
+                    let newer = channel
+                        .messages(http, serenity::GetMessages::new().after(after_cursor).limit(batch_size))
+                        .await
+                        .unwrap_or_default();
+                    if !newer.is_empty() {
+                        after_cursor = newer.iter().map(|m| m.id).max().unwrap_or(after_cursor);
+                        collected.extend(newer);
+                    }
+                }
+
+                if collected.len() == pre_len {
+                    break;
+                }
+            }
+        }
+    } else {
+        // Search recent messages (descending from newest)
+        let mut cursor: Option<serenity::MessageId> = None;
+        while collected.len() < scan_limit {
+            let batch_size = (scan_limit - collected.len()).min(100) as u8;
+            let builder = if let Some(before) = cursor {
+                serenity::GetMessages::new().before(before).limit(batch_size)
+            } else {
+                serenity::GetMessages::new().limit(batch_size)
+            };
+
+            let batch = channel
+                .messages(http, builder)
+                .await
+                .map_err(|e| format!("Failed to fetch messages: {e}"))?;
+
+            if batch.is_empty() {
+                break;
+            }
+            cursor = batch.iter().map(|m| m.id).min();
+            collected.extend(batch);
+        }
+    }
+
+    // Dedup and sort
+    collected.sort_by_key(|m| m.id);
+    collected.dedup_by_key(|m| m.id);
+    if !sort_asc {
+        collected.reverse();
+    }
+
+    // Filter by query keyword
+    let matched: Vec<&serenity::Message> = collected
+        .iter()
+        .filter(|m| m.content.to_lowercase().contains(&query) || m.author.name.to_lowercase().contains(&query))
+        .collect();
+
+    let formatted: Vec<String> = matched
+        .iter()
+        .map(|m| {
+            let ts = chrono::DateTime::from_timestamp(m.timestamp.unix_timestamp(), 0)
+                .map(|dt| {
+                    dt.with_timezone(&jst_offset)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_else(|| m.timestamp.to_string());
+            let content = if m.content.is_empty() {
+                "[Attachment/Embed]"
+            } else {
+                &m.content
+            };
+            format!("[{}] {}: {}", ts, m.author.name, content)
+        })
+        .collect();
+
+    let result = text_result(if formatted.is_empty() {
+        format!("No messages matching '{}' found (scanned {} messages)", query, collected.len())
+    } else {
+        format!(
+            "Found {} matching messages (scanned {}):\n{}",
+            formatted.len(),
+            collected.len(),
+            formatted.join("\n")
+        )
     });
     Ok((result, vec![]))
 }
