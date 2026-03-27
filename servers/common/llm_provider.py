@@ -236,7 +236,8 @@ def build_chat_messages(
                 "role": "system",
                 "content": (
                     "[The following are recalled memories from past conversations. "
-                    "They are NOT recent messages. Time references in them may be outdated.]"
+                    "They are NOT recent messages. Time references in them may be outdated. "
+                    "Do NOT include memory annotations such as [Memory from ...] in your responses.]"
                 ),
             }
         )
@@ -266,6 +267,50 @@ def build_chat_messages(
                 "content": "[End of recalled memories. Current conversation follows.]",
             }
         )
+
+    # Inject external message context so the LLM can use origin-specific tools
+    msg_metadata = message.get("metadata", {})
+    external_source = msg_metadata.get("external_source")
+    if external_source:
+        context_parts = [f"source: {external_source}"]
+        for key in ("external_channel_id", "external_message_id", "external_guild_id"):
+            val = msg_metadata.get(key)
+            if val:
+                # Strip "external_" prefix for readability
+                context_parts.append(f"{key.removeprefix('external_')}: {val}")
+        sender = msg_metadata.get("external_sender_name")
+        if sender:
+            context_parts.append(f"sender: {sender}")
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "[External message context: "
+                    + ", ".join(context_parts)
+                    + ". Use these IDs if you need to call tools targeting this message.]"
+                ),
+            }
+        )
+
+        # Inject reply reference context if this message is a reply
+        ref_raw = msg_metadata.get("external_reference")
+        if ref_raw:
+            try:
+                ref_data = json.loads(ref_raw) if isinstance(ref_raw, str) else ref_raw
+                ref_author = ref_data.get("author_name", "Unknown")
+                ref_content = ref_data.get("content", "")
+                if ref_content:
+                    # Truncate long messages to avoid context bloat
+                    if len(ref_content) > 200:
+                        ref_content = ref_content[:200] + "..."
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (f'[This is a reply to a message by {ref_author}: "{ref_content}"]'),
+                        }
+                    )
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     # Extract user name from source for multi-user awareness
     source = message.get("source", {})
