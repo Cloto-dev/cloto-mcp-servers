@@ -13,10 +13,13 @@ Phase 6: Memory portability — JSONL export/import, pre-computed summary suppor
          Claude Code integration — COMPLETE
 Phase 7: Memory confidence score — cosine + time decay geometric mean,
          opt-in confidence metadata in recall output — COMPLETE
+Phase 8: Scalability — memories FTS5 index, heapq top-K vector search,
+         adaptive scan limits — COMPLETE
 """
 
 import asyncio
 import hashlib
+import heapq
 import json
 import logging
 import math
@@ -439,7 +442,7 @@ _task_queue: MemoryTaskQueue | None = None
 # Database
 # ============================================================
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -524,6 +527,22 @@ CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
     INSERT INTO episodes_fts(rowid, summary, keywords)
     VALUES (new.id, new.summary, new.keywords);
 END;
+
+-- v2.3.4: FTS5 index on memories for scalable keyword search
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    content,
+    content=memories,
+    content_rowid=id
+);
+
+CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content)
+    VALUES ('delete', old.id, old.content);
+END;
 """
 
 _db: aiosqlite.Connection | None = None
@@ -561,6 +580,13 @@ async def get_db() -> aiosqlite.Connection:
             await _db.execute("ALTER TABLE episodes ADD COLUMN resolved INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass  # Column already exists (e.g., fresh DB with updated SCHEMA_SQL)
+
+    # v2.3.4: Backfill memories_fts from existing data
+    if current < 4 and FTS_ENABLED:
+        try:
+            await _db.execute("INSERT OR IGNORE INTO memories_fts(rowid, content) SELECT id, content FROM memories")
+        except Exception:
+            pass  # Table may not exist if FTS disabled, or already populated
 
     if current < SCHEMA_VERSION:
         await _db.execute(
@@ -744,6 +770,7 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
     query_dim = len(query_vec)
 
     candidates: list[tuple[float, dict]] = []
+    scan_limit = min(MAX_MEMORIES, max(limit * 10, 100))
 
     # 2. Search memory embeddings
     rows = await db.execute_fetchall(
@@ -752,7 +779,7 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
            WHERE agent_id = ? AND embedding IS NOT NULL
            ORDER BY created_at DESC
            LIMIT ?""",
-        (agent_id, MAX_MEMORIES),
+        (agent_id, scan_limit),
     )
 
     for row in rows:
@@ -788,7 +815,7 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
            WHERE agent_id = ? AND embedding IS NOT NULL
            ORDER BY created_at DESC
            LIMIT ?""",
-        (agent_id, MAX_MEMORIES),
+        (agent_id, scan_limit),
     )
 
     for row in ep_rows:
@@ -817,9 +844,9 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
             logger.debug("Skipping episode %s: vector decode error: %s", ep_id, e)
             continue
 
-    # 4. Sort by similarity descending, return top-K
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return [c[1] for c in candidates[:limit]]
+    # 4. Return top-K by similarity (heap selection: O(N log K) vs O(N log N) sort)
+    top_k = heapq.nlargest(limit, candidates, key=lambda x: x[0])
+    return [c[1] for c in top_k]
 
 
 async def _search_episodes_fts(db: aiosqlite.Connection, agent_id: str, query: str, limit: int) -> list[dict]:
@@ -858,19 +885,8 @@ async def _search_episodes_fts(db: aiosqlite.Connection, agent_id: str, query: s
 
 
 async def _search_memories_keyword(db: aiosqlite.Connection, agent_id: str, query: str, limit: int) -> list[dict]:
-    """Search memories using keyword matching (2.2-compatible fallback)."""
-    if query.strip():
-        # Keyword match
-        rows = await db.execute_fetchall(
-            """SELECT id, msg_id, content, source, timestamp
-               FROM memories
-               WHERE agent_id = ?
-               AND content LIKE ?
-               ORDER BY created_at DESC
-               LIMIT ?""",
-            (agent_id, f"%{query}%", MAX_MEMORIES),
-        )
-    else:
+    """Search memories using FTS5 (preferred) or LIKE fallback."""
+    if not query.strip():
         # No query — return recent memories
         rows = await db.execute_fetchall(
             """SELECT id, msg_id, content, source, timestamp
@@ -880,22 +896,40 @@ async def _search_memories_keyword(db: aiosqlite.Connection, agent_id: str, quer
                LIMIT ?""",
             (agent_id, limit),
         )
+        return [{"id": r[0], "msg_id": r[1], "content": r[2], "source": r[3], "timestamp": r[4]} for r in rows]
 
-    results = []
-    for row in rows:
-        results.append(
-            {
-                "id": row[0],
-                "msg_id": row[1],
-                "content": row[2],
-                "source": row[3],
-                "timestamp": row[4],
-            }
-        )
-        if len(results) >= limit:
-            break
+    # v2.3.4: Use FTS5 on memories when available
+    if FTS_ENABLED:
+        sanitized = re.sub(r"[^\w\s]", "", query, flags=re.UNICODE)
+        words = sanitized.split()
+        if words:
+            fts_query = " ".join(f'"{w}"' for w in words)
+            rows = await db.execute_fetchall(
+                """SELECT m.id, m.msg_id, m.content, m.source, m.timestamp
+                   FROM memories_fts f
+                   JOIN memories m ON f.rowid = m.id
+                   WHERE memories_fts MATCH ?
+                   AND m.agent_id = ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (fts_query, agent_id, limit),
+            )
+            if rows:
+                return [{"id": r[0], "msg_id": r[1], "content": r[2], "source": r[3], "timestamp": r[4]} for r in rows]
+            # FTS5 returned nothing — fall through to LIKE
 
-    return results
+    # LIKE fallback (FTS disabled or FTS returned no results)
+    scan_limit = min(MAX_MEMORIES, max(limit * 5, 50))
+    rows = await db.execute_fetchall(
+        """SELECT id, msg_id, content, source, timestamp
+           FROM memories
+           WHERE agent_id = ?
+           AND content LIKE ?
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (agent_id, f"%{query}%", scan_limit),
+    )
+    return [{"id": r[0], "msg_id": r[1], "content": r[2], "source": r[3], "timestamp": r[4]} for r in rows[:limit]]
 
 
 async def do_update_profile(agent_id: str, history: list[dict]) -> dict:
