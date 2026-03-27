@@ -5,7 +5,8 @@
 //!
 //! Communication flow:
 //!   Agent → tools/call → Kernel → stdio → this server → Discord API
-//!   Discord Gateway → this server → notifications/mgp.event → Kernel → SSE → Dashboard
+//!   Discord Gateway → this server → notifications/mgp.callback.request → Kernel → agentic loop
+//!   Kernel → mgp/callback/respond → this server → Discord API (auto-reply)
 //!
 //! Architecture:
 //!   - std::thread reads stdin lines → mpsc → main loop
@@ -23,9 +24,27 @@ use handler::{DiscordEvent, DiscordHandler};
 use protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use serde_json::{json, Value};
 use serenity::all as serenity;
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+
+/// Context stored for pending callbacks awaiting kernel response.
+struct CallbackContext {
+    channel_id: String,
+    #[allow(dead_code)]
+    guild_id: Option<String>,
+    #[allow(dead_code)]
+    message_id: String,
+    #[allow(dead_code)]
+    author_name: String,
+    /// Typing indicator guard — dropping this stops the typing indicator.
+    /// Serenity's `Typing` holds a `oneshot::Sender`; when dropped, the internal
+    /// refresh task sees `Closed` and exits.
+    _typing: Option<serenity::http::Typing>,
+}
+
+type PendingCallbacks = Arc<Mutex<HashMap<String, CallbackContext>>>;
 
 #[tokio::main]
 async fn main() {
@@ -48,6 +67,9 @@ async fn main() {
 
     // Shared stdout writer (Mutex for thread safety between stdin dispatch and Discord events)
     let stdout = Arc::new(Mutex::new(io::stdout()));
+
+    // Pending callbacks: maps callback_id → CallbackContext for response routing
+    let pending_callbacks: PendingCallbacks = Arc::new(Mutex::new(HashMap::new()));
 
     // Discord event channel
     let (discord_tx, mut discord_rx) = mpsc::unbounded_channel::<DiscordEvent>();
@@ -111,10 +133,10 @@ async fn main() {
     loop {
         tokio::select! {
             Some(line) = stdin_rx.recv() => {
-                handle_stdin_line(&line, &stdout, &http, &config).await;
+                handle_stdin_line(&line, &stdout, &http, &config, &pending_callbacks).await;
             }
             Some(event) = discord_rx.recv() => {
-                handle_discord_event(event, &stdout);
+                handle_discord_event(event, &stdout, &pending_callbacks, &http).await;
             }
             else => break,
         }
@@ -128,6 +150,7 @@ async fn handle_stdin_line(
     stdout: &Arc<Mutex<io::Stdout>>,
     http: &Option<Arc<serenity::Http>>,
     config: &Arc<DiscordConfig>,
+    pending_callbacks: &PendingCallbacks,
 ) {
     let request: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -144,7 +167,7 @@ async fn handle_stdin_line(
         return;
     }
 
-    let (response, notifications) = dispatch(&request, http, config).await;
+    let (response, notifications) = dispatch(&request, http, config, pending_callbacks).await;
 
     // Emit notifications BEFORE the response (avatar pattern)
     for notif in &notifications {
@@ -157,11 +180,15 @@ async fn dispatch(
     request: &JsonRpcRequest,
     http: &Option<Arc<serenity::Http>>,
     config: &Arc<DiscordConfig>,
+    pending_callbacks: &PendingCallbacks,
 ) -> (JsonRpcResponse, Vec<JsonRpcNotification>) {
     match request.method.as_str() {
         "initialize" => (handle_initialize(request), vec![]),
         "tools/list" => (handle_tools_list(request), vec![]),
         "tools/call" => handle_tools_call(request, http, config).await,
+        "mgp/callback/respond" => {
+            (handle_callback_respond(request, http, config, pending_callbacks).await, vec![])
+        }
         "notifications/initialized" => {
             // MCP initialized notification — no response needed but we already
             // filtered notifications above. This is a safety fallback.
@@ -252,23 +279,160 @@ async fn handle_tools_call(
     }
 }
 
-fn handle_discord_event(event: DiscordEvent, stdout: &Arc<Mutex<io::Stdout>>) {
+/// Handle mgp/callback/respond from the kernel — auto-send response to Discord.
+async fn handle_callback_respond(
+    request: &JsonRpcRequest,
+    http: &Option<Arc<serenity::Http>>,
+    config: &Arc<DiscordConfig>,
+    pending_callbacks: &PendingCallbacks,
+) -> JsonRpcResponse {
+    let params = match &request.params {
+        Some(p) => p,
+        None => {
+            return JsonRpcResponse::err(request.id.clone(), -32602, "Missing params");
+        }
+    };
+
+    let callback_id = params
+        .get("callback_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let response = params
+        .get("response")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if callback_id.is_empty() || response.is_empty() {
+        return JsonRpcResponse::err(
+            request.id.clone(),
+            -32602,
+            "callback_id and response are required",
+        );
+    }
+
+    // Look up the pending callback context
+    let ctx = pending_callbacks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(callback_id);
+
+    let Some(ctx) = ctx else {
+        tracing::warn!(callback_id = %callback_id, "No pending callback found — may have expired");
+        return JsonRpcResponse::ok(
+            request.id.clone(),
+            json!({"status": "not_found", "callback_id": callback_id}),
+        );
+    };
+
+    // Typing indicator stops automatically when ctx (and its _typing guard) is dropped.
+
+    // Send the response to the original Discord channel
+    let Some(http) = http else {
+        return JsonRpcResponse::err(request.id.clone(), -32000, "Discord not connected");
+    };
+
+    let send_args = json!({
+        "channel_id": ctx.channel_id,
+        "content": response,
+    });
+
+    match tools::execute("send_message", &send_args, http, config).await {
+        Ok(_) => {
+            tracing::info!(
+                callback_id = %callback_id,
+                channel_id = %ctx.channel_id,
+                "Callback response sent to Discord"
+            );
+            JsonRpcResponse::ok(
+                request.id.clone(),
+                json!({"status": "sent", "callback_id": callback_id, "channel_id": ctx.channel_id}),
+            )
+        }
+        Err(e) => {
+            tracing::error!(
+                callback_id = %callback_id,
+                error = %e,
+                "Failed to send callback response to Discord"
+            );
+            JsonRpcResponse::err(request.id.clone(), -32000, format!("Discord send failed: {e}"))
+        }
+    }
+}
+
+async fn handle_discord_event(
+    event: DiscordEvent,
+    stdout: &Arc<Mutex<io::Stdout>>,
+    pending_callbacks: &PendingCallbacks,
+    http: &Option<Arc<serenity::Http>>,
+) {
     match event {
         DiscordEvent::MessageCreate(msg) => {
+            let callback_id = format!("discord-{}", msg.message_id);
+
+            // Start typing indicator (auto-refreshes until Typing guard is dropped)
+            let typing = if let Some(http) = http {
+                let channel_id: u64 = msg.channel_id.parse().unwrap_or(0);
+                if channel_id > 0 {
+                    let cid = serenity::ChannelId::new(channel_id);
+                    Some(cid.start_typing(http))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Register pending callback context for response routing
+            if let Ok(mut cbs) = pending_callbacks.lock() {
+                cbs.insert(
+                    callback_id.clone(),
+                    CallbackContext {
+                        channel_id: msg.channel_id.clone(),
+                        guild_id: msg.guild_id.clone(),
+                        message_id: msg.message_id.clone(),
+                        author_name: msg.author_name.clone(),
+                        _typing: typing,
+                    },
+                );
+            }
+
+            // Build message content with image attachment info
+            let mut message_content = msg.content.clone();
+            let image_attachments: Vec<_> = msg
+                .attachments
+                .iter()
+                .filter(|a| {
+                    a.content_type
+                        .as_deref()
+                        .is_some_and(|ct| ct.starts_with("image/"))
+                })
+                .collect();
+            if !image_attachments.is_empty() {
+                let image_lines: Vec<String> = image_attachments
+                    .iter()
+                    .map(|a| format!("- {} ({})", a.url, a.filename))
+                    .collect();
+                message_content = format!(
+                    "{}\n\n[Attached Images]\n{}",
+                    message_content,
+                    image_lines.join("\n")
+                );
+            }
+
+            // Emit callback request (MGP §13) — kernel will process and respond
             let notif = JsonRpcNotification::new(
-                "notifications/mgp.event",
+                "notifications/mgp.callback.request",
                 Some(json!({
-                    "channel": "discord.message_received",
-                    "data": {
-                        "guild_id": msg.guild_id,
+                    "callback_id": callback_id,
+                    "type": "external_message",
+                    "message": message_content,
+                    "metadata": {
+                        "source": "discord",
+                        "author_id": msg.author_id,
+                        "author_name": msg.author_name,
                         "channel_id": msg.channel_id,
+                        "guild_id": msg.guild_id,
                         "message_id": msg.message_id,
-                        "author": {
-                            "id": msg.author_id,
-                            "name": msg.author_name,
-                            "bot": msg.author_bot,
-                        },
-                        "content": msg.content,
                         "timestamp": msg.timestamp,
                         "attachments": msg.attachments.iter().map(|a| json!({
                             "url": a.url,
