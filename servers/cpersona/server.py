@@ -11,12 +11,15 @@ Phase 4: Anti-contamination — memory boundary markers, timestamp annotations,
 Phase 5: Background task queue (DB-persisted, crash-recoverable) — COMPLETE
 Phase 6: Memory portability — JSONL export/import, pre-computed summary support,
          Claude Code integration — COMPLETE
+Phase 7: Memory confidence score — cosine + time decay geometric mean,
+         opt-in confidence metadata in recall output — COMPLETE
 """
 
 import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import struct
@@ -71,6 +74,13 @@ LLM_MODEL = os.environ.get("CPERSONA_LLM_MODEL", "gpt-oss-120b")
 
 # Background task queue (Phase 5: crash-recoverable async processing)
 TASK_QUEUE_ENABLED = os.environ.get("CPERSONA_TASK_QUEUE_ENABLED", "true").lower() == "true"
+
+# Confidence scoring (v2.3.2)
+CONFIDENCE_ENABLED = os.environ.get("CPERSONA_CONFIDENCE_ENABLED", "false").lower() == "true"
+COSINE_FLOOR = float(os.environ.get("CPERSONA_COSINE_FLOOR", "0.20"))
+COSINE_CEIL = float(os.environ.get("CPERSONA_COSINE_CEIL", "0.75"))
+DECAY_RATE = float(os.environ.get("CPERSONA_DECAY_RATE", "0.005"))
+RESOLVED_DECAY_FACTOR = float(os.environ.get("CPERSONA_RESOLVED_DECAY_FACTOR", "0.3"))
 TASK_MAX_RETRIES = int(os.environ.get("CPERSONA_TASK_MAX_RETRIES", "3"))
 TASK_RETRY_DELAY = int(os.environ.get("CPERSONA_TASK_RETRY_DELAY", "30"))  # seconds
 
@@ -429,7 +439,7 @@ _task_queue: MemoryTaskQueue | None = None
 # Database
 # ============================================================
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -472,6 +482,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     embedding  BLOB,
     start_time TEXT,
     end_time   TEXT,
+    resolved   INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -540,9 +551,17 @@ async def get_db() -> aiosqlite.Connection:
     if FTS_ENABLED:
         await _db.executescript(FTS_SQL)
 
-    # Track schema version
+    # Track schema version and apply migrations
     row = await _db.execute_fetchall("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
     current = row[0][0] if row else 0
+
+    # v2.3.3: Add resolved column to episodes
+    if current < 3:
+        try:
+            await _db.execute("ALTER TABLE episodes ADD COLUMN resolved INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # Column already exists (e.g., fresh DB with updated SCHEMA_SQL)
+
     if current < SCHEMA_VERSION:
         await _db.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
@@ -616,7 +635,7 @@ async def do_store(agent_id: str, message: dict) -> dict:
     return {"ok": True}
 
 
-async def do_recall(agent_id: str, query: str, limit: int) -> dict:
+async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -> dict:
     """Recall relevant memories using multi-strategy search."""
     db = await get_db()
     results: list[dict] = []
@@ -666,6 +685,15 @@ async def do_recall(agent_id: str, query: str, limit: int) -> dict:
                 results.append(row)
                 seen_ids.add(rid)
 
+    # v2.3.2+: Re-rank by confidence score before truncation (if enabled)
+    if CONFIDENCE_ENABLED:
+        for r in results:
+            ts = r.get("timestamp", "")
+            raw_cos = r.get("_cosine")
+            is_resolved = r.get("_resolved", False)
+            r["_confidence_score"] = _compute_confidence(raw_cos, ts, resolved=is_resolved, deep=deep)["score"]
+        results.sort(key=lambda r: r.get("_confidence_score", 0), reverse=True)
+
     # Truncate to limit and reverse for chronological order (oldest first for LLM)
     results = results[:limit]
     results.reverse()
@@ -688,8 +716,17 @@ async def do_recall(agent_id: str, query: str, limit: int) -> dict:
             msg["timestamp"] = r["timestamp"]
         if r.get("msg_id"):
             msg["id"] = r["msg_id"]
+        # v2.3.2+: Attach confidence metadata
+        if CONFIDENCE_ENABLED:
+            raw_cosine = r.get("_cosine")
+            ts = r.get("timestamp", "")
+            is_resolved = r.get("_resolved", False)
+            msg["confidence"] = _compute_confidence(raw_cosine, ts, resolved=is_resolved, deep=deep)
         # Remove internal tracking keys
         r.pop("_rid", None)
+        r.pop("_cosine", None)
+        r.pop("_confidence_score", None)
+        r.pop("_resolved", None)
         messages.append(msg)
 
     return {"messages": messages}
@@ -732,6 +769,7 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
                         {
                             "id": mem_id,
                             "_rid": ("mem", mem_id),
+                            "_cosine": sim,
                             "msg_id": msg_id,
                             "content": content,
                             "source": source,
@@ -745,7 +783,7 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
 
     # 3. Search episode embeddings
     ep_rows = await db.execute_fetchall(
-        """SELECT id, summary, start_time, embedding
+        """SELECT id, summary, start_time, embedding, resolved
            FROM episodes
            WHERE agent_id = ? AND embedding IS NOT NULL
            ORDER BY created_at DESC
@@ -754,7 +792,7 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
     )
 
     for row in ep_rows:
-        ep_id, summary, start_time, blob = row
+        ep_id, summary, start_time, blob, ep_resolved = row
         try:
             ep_vec = np.frombuffer(blob, dtype=np.float32)
             if len(ep_vec) != query_dim:
@@ -767,9 +805,11 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
                         {
                             "id": ep_id,
                             "_rid": ("ep", ep_id),
+                            "_cosine": sim,
                             "content": f"[Episode] {summary}",
                             "source": {"System": "episode"},
                             "timestamp": start_time or "",
+                            "_resolved": bool(ep_resolved),
                         },
                     )
                 )
@@ -795,7 +835,7 @@ async def _search_episodes_fts(db: aiosqlite.Connection, agent_id: str, query: s
     fts_query = " ".join(f'"{w}"' for w in words)
 
     rows = await db.execute_fetchall(
-        """SELECT e.id, e.summary, e.start_time
+        """SELECT e.id, e.summary, e.start_time, e.resolved
            FROM episodes_fts f
            JOIN episodes e ON f.rowid = e.id
            WHERE episodes_fts MATCH ?
@@ -811,6 +851,7 @@ async def _search_episodes_fts(db: aiosqlite.Connection, agent_id: str, query: s
             "content": f"[Episode] {row[1]}",
             "source": {"System": "episode"},
             "timestamp": row[2] or "",
+            "_resolved": bool(row[3]),
         }
         for row in rows
     ]
@@ -912,13 +953,21 @@ async def do_update_profile(agent_id: str, history: list[dict]) -> dict:
     return {"ok": True, "profiles_updated": 1}
 
 
-async def do_archive_episode(agent_id: str, history: list[dict], summary: str = "", keywords: str = "") -> dict:
+async def do_archive_episode(
+    agent_id: str,
+    history: list[dict],
+    summary: str = "",
+    keywords: str = "",
+    resolved: bool | None = None,
+) -> dict:
     """Summarize conversation via LLM and archive as episode with keywords + embedding.
 
     When `summary` and/or `keywords` are pre-computed (e.g., by a Claude Code
     sub-agent), the corresponding LLM proxy call is skipped. This enables
     cost-efficient summarization via cheaper models (Sonnet/Haiku) in
     environments without a kernel LLM proxy.
+
+    When `resolved` is None, the LLM classifies whether the topic was concluded.
     """
     db = await get_db()
 
@@ -1000,6 +1049,18 @@ async def do_archive_episode(agent_id: str, history: list[dict], summary: str = 
         else:
             keywords = keywords_result.strip()
 
+    # v2.3.3: Resolved classification
+    if resolved is None and summary:
+        resolved_prompt = (
+            "Based on the following conversation summary, determine if the main task "
+            "or discussion was completed, resolved, or concluded.\n"
+            "Output ONLY 'true' or 'false'.\n\n"
+            f"{summary}"
+        )
+        resolved_result = await call_llm_proxy(resolved_prompt)
+        resolved = resolved_result is not None and resolved_result.strip().lower() == "true"
+    resolved = bool(resolved)
+
     # Timestamps
     timestamps = [msg.get("timestamp", "") for msg in history if msg.get("timestamp")]
     start_time = min(timestamps) if timestamps else None
@@ -1016,9 +1077,9 @@ async def do_archive_episode(agent_id: str, history: list[dict], summary: str = 
             logger.warning("Embedding failed for episode: %s", e)
 
     cursor = await db.execute(
-        """INSERT INTO episodes (agent_id, summary, keywords, start_time, end_time, embedding)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (agent_id, summary, keywords, start_time, end_time, embedding_blob),
+        """INSERT INTO episodes (agent_id, summary, keywords, start_time, end_time, embedding, resolved)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (agent_id, summary, keywords, start_time, end_time, embedding_blob, int(resolved)),
     )
     await db.commit()
     return {"ok": True, "episode_id": cursor.lastrowid}
@@ -1040,6 +1101,58 @@ def _format_memory_timestamp(ts_raw: str) -> str | None:
         return local_dt.strftime(f"%Y-%m-%d %H:%M {tz_name}")
     except (ValueError, OSError):
         return None
+
+
+def _parse_timestamp_utc(ts_raw: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp string into a UTC datetime."""
+    if not ts_raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+        return dt.astimezone(timezone.utc)
+    except (ValueError, OSError):
+        return None
+
+
+def _compute_confidence(
+    raw_cosine: float | None,
+    timestamp_str: str,
+    *,
+    resolved: bool = False,
+    deep: bool = False,
+) -> dict:
+    """Compute confidence metadata for a recall result (v2.3.2+).
+
+    Returns a dict with 'age_hours', 'score', and optionally 'cosine', 'resolved'.
+    Score = sqrt(norm_cos × time_decay) × completion_factor.
+    When deep=True, time_decay and completion_factor are both 1.0.
+    """
+    now = datetime.now(timezone.utc)
+    age_hours = 0.0
+
+    parsed = _parse_timestamp_utc(timestamp_str)
+    if parsed:
+        age_hours = max(0.0, (now - parsed).total_seconds() / 3600)
+
+    # v2.3.3: deep recall disables decay
+    time_decay = 1.0 if deep else 1.0 / (1.0 + age_hours * DECAY_RATE)
+    completion_factor = 1.0 if (deep or not resolved) else RESOLVED_DECAY_FACTOR
+
+    confidence: dict = {"age_hours": round(age_hours, 1)}
+    if resolved:
+        confidence["resolved"] = True
+
+    if raw_cosine is not None:
+        # Normalize cosine to 0.0–1.0 range
+        denom = COSINE_CEIL - COSINE_FLOOR
+        norm_cos = max(0.0, min(1.0, (raw_cosine - COSINE_FLOOR) / denom)) if denom > 0 else 0.0
+        confidence["cosine"] = round(raw_cosine, 4)
+        confidence["score"] = round(math.sqrt(norm_cos * time_decay) * completion_factor, 4)
+    else:
+        # Non-vector results: score based on time decay only
+        confidence["score"] = round(math.sqrt(time_decay) * completion_factor, 4)
+
+    return confidence
 
 
 def _try_parse_json(s: str) -> dict:
@@ -1472,11 +1585,16 @@ registry.auto_tool(
             "agent_id": {"type": "string", "description": "Agent identifier"},
             "query": {"type": "string", "description": "Search query (empty returns recent memories)"},
             "limit": {"type": "integer", "description": "Max memories to return", "default": 10},
+            "deep": {
+                "type": "boolean",
+                "description": "Deep recall — disable time and completion decay for exhaustive search",
+                "default": False,
+            },
         },
         "required": ["agent_id", "query"],
     },
     do_recall,
-    [("agent_id", str), ("query", str), ("limit", int, 10)],
+    [("agent_id", str), ("query", str), ("limit", int, 10), ("deep", bool, False)],
     annotations=ToolAnnotations(readOnlyHint=True),
 )
 
@@ -1489,7 +1607,9 @@ async def do_update_profile_or_queue(agent_id: str, history: list) -> dict:
     return await do_update_profile(agent_id, history)
 
 
-async def do_archive_episode_or_queue(agent_id: str, history: list, summary: str = "", keywords: str = "") -> dict:
+async def do_archive_episode_or_queue(
+    agent_id: str, history: list, summary: str = "", keywords: str = "", resolved: bool | None = None
+) -> dict:
     """Enqueue episode archival if task queue is enabled, otherwise run synchronously.
 
     When summary/keywords are pre-computed, bypass the queue and store directly
@@ -1497,7 +1617,7 @@ async def do_archive_episode_or_queue(agent_id: str, history: list, summary: str
     """
     if summary:
         # Pre-computed: store directly, no LLM needed
-        return await do_archive_episode(agent_id, history, summary=summary, keywords=keywords)
+        return await do_archive_episode(agent_id, history, summary=summary, keywords=keywords, resolved=resolved)
     if _task_queue and TASK_QUEUE_ENABLED:
         task_id = await _task_queue.enqueue("archive_episode", agent_id, history)
         return {"ok": True, "queued": True, "task_id": task_id}
@@ -1530,7 +1650,8 @@ registry.auto_tool(
 registry.auto_tool(
     "archive_episode",
     "Summarize and archive a conversation episode for searchable recall. "
-    "When summary/keywords are provided, LLM summarization is skipped (use for pre-computed summaries from sub-agents).",
+    "When summary/keywords are provided, LLM summarization is skipped (use for pre-computed summaries from sub-agents). "
+    "Resolved status is auto-classified by LLM unless explicitly provided.",
     {
         "type": "object",
         "properties": {
@@ -1550,11 +1671,15 @@ registry.auto_tool(
                 "description": "Pre-computed space-separated keywords (skips LLM extraction when provided)",
                 "default": "",
             },
+            "resolved": {
+                "type": "boolean",
+                "description": "Pre-computed resolution status — true if the topic was completed/concluded (skips LLM classification when provided)",
+            },
         },
         "required": ["agent_id"],
     },
     do_archive_episode_or_queue,
-    [("agent_id", str), ("history", list, []), ("summary", str, ""), ("keywords", str, "")],
+    [("agent_id", str), ("history", list, []), ("summary", str, ""), ("keywords", str, ""), ("resolved", bool, None)],
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
 )
 
@@ -1711,13 +1836,13 @@ async def _run_http_server():
     from collections.abc import AsyncIterator
 
     import uvicorn
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from starlette.applications import Starlette
     from starlette.middleware import Middleware
     from starlette.middleware.cors import CORSMiddleware
     from starlette.requests import Request
     from starlette.responses import JSONResponse
     from starlette.routing import Mount
-    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     auth_token = os.environ.get("CPERSONA_AUTH_TOKEN", "")
 
@@ -1749,7 +1874,8 @@ async def _run_http_server():
                 # Validate token if both are present
                 if not header.startswith("Bearer ") or header[7:] != auth_token:
                     response = JSONResponse(
-                        {"error": "unauthorized"}, status_code=401,
+                        {"error": "unauthorized"},
+                        status_code=401,
                         headers={"WWW-Authenticate": "Bearer"},
                     )
                     await response(scope, receive, send)
@@ -1772,8 +1898,13 @@ async def _run_http_server():
                 CORSMiddleware,
                 allow_origins=["https://claude.ai", "https://www.claude.ai"],
                 allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-                allow_headers=["Authorization", "Content-Type",
-                               "Mcp-Session-Id", "Mcp-Protocol-Version", "Last-Event-Id"],
+                allow_headers=[
+                    "Authorization",
+                    "Content-Type",
+                    "Mcp-Session-Id",
+                    "Mcp-Protocol-Version",
+                    "Last-Event-Id",
+                ],
                 expose_headers=["Mcp-Session-Id"],
             ),
             Middleware(BearerTokenMiddleware),
