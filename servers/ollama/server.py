@@ -215,8 +215,16 @@ async def handle_think(arguments: dict) -> dict:
             "agent": {"type": "object", "description": "Agent metadata (name, description, metadata)"},
             "message": {"type": "object", "description": "User message with 'content' field"},
             "context": {"type": "array", "description": "Conversation context messages", "items": {"type": "object"}},
-            "tools": {"type": "array", "description": "Available tool schemas (OpenAI format)", "items": {"type": "object"}},
-            "tool_history": {"type": "array", "description": "Prior tool calls and results", "items": {"type": "object"}},
+            "tools": {
+                "type": "array",
+                "description": "Available tool schemas (OpenAI format)",
+                "items": {"type": "object"},
+            },
+            "tool_history": {
+                "type": "array",
+                "description": "Prior tool calls and results",
+                "items": {"type": "object"},
+            },
         },
         "required": ["agent", "message", "context", "tools", "tool_history"],
     },

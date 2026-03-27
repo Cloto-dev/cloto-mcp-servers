@@ -38,8 +38,7 @@ def _read_stdin_lines(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
 
 
 async def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s",
-                        stream=sys.stderr)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s", stream=sys.stderr)
     logger.info("Proxy starting: %s", REMOTE_URL)
 
     session_id: str | None = None
@@ -109,11 +108,13 @@ def _write_error(request_line: bytes | str, error_msg: str):
         req_id = None
 
     if req_id is not None:
-        error = json.dumps({
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "error": {"code": -32000, "message": error_msg},
-        })
+        error = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32000, "message": error_msg},
+            }
+        )
         _write_stdout(error)
 
 

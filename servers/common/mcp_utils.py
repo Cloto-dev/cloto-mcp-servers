@@ -44,7 +44,15 @@ class ToolRegistry:
 
         return decorator
 
-    def auto_tool(self, name: str, description: str, schema: dict, handler: Callable, params: list[tuple], annotations: ToolAnnotations | None = None):
+    def auto_tool(
+        self,
+        name: str,
+        description: str,
+        schema: dict,
+        handler: Callable,
+        params: list[tuple],
+        annotations: ToolAnnotations | None = None,
+    ):
         """Register a tool with auto-validated parameter extraction.
 
         Each entry in *params* is ``(key, type)`` or ``(key, type, default)``.

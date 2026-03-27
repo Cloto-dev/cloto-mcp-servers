@@ -79,7 +79,7 @@ async def test_export_creates_valid_jsonl():
     for i, line in enumerate(lines[1:], 0):
         assert line["_type"] == "memory"
         assert line["agent_id"] == "agent.test"
-        assert f"Test memory content" in line["content"]
+        assert "Test memory content" in line["content"]
 
     os.remove(out_path)
 
