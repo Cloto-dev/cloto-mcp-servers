@@ -385,6 +385,16 @@ class VectorIndex:
         await self._db.commit()
         return removed
 
+    async def purge_namespace(self, namespace: str) -> int:
+        """Remove all vectors in a namespace. Returns count removed."""
+        if not self._db:
+            raise RuntimeError("VectorIndex not initialized")
+
+        cursor = await self._db.execute("DELETE FROM vectors WHERE namespace = ?", (namespace,))
+        await self._db.commit()
+        removed = len(self._index.pop(namespace, {}))
+        return max(cursor.rowcount, removed)
+
     async def count(self, namespace: str) -> int:
         """Count vectors in a namespace."""
         return len(self._index.get(namespace, {}))
@@ -538,6 +548,28 @@ async def handle_remove(request: web.Request) -> web.Response:
         return web.json_response({"error": f"Remove failed: {e}"}, status=500)
 
 
+async def handle_purge(request: web.Request) -> web.Response:
+    """POST /purge — Remove all vectors in a namespace."""
+    if _vector_index is None:
+        return web.json_response({"error": "Not initialized"}, status=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    namespace = body.get("namespace")
+    if not isinstance(namespace, str) or not namespace.strip():
+        return web.json_response({"error": "'namespace' must be a non-empty string"}, status=400)
+
+    try:
+        removed = await _vector_index.purge_namespace(namespace)
+        return web.json_response({"ok": True, "removed": removed})
+    except Exception as e:
+        logger.exception("Purge failed")
+        return web.json_response({"error": f"Purge failed: {e}"}, status=500)
+
+
 async def run_http_server(port: int) -> None:
     """Run the HTTP embedding endpoint alongside MCP stdio."""
     app = web.Application()
@@ -546,6 +578,7 @@ async def run_http_server(port: int) -> None:
         app.router.add_post("/index", handle_index)
         app.router.add_post("/search", handle_search)
         app.router.add_post("/remove", handle_remove)
+        app.router.add_post("/purge", handle_purge)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -725,6 +758,35 @@ async def handle_remove_tool(arguments: dict) -> dict:
 
     try:
         removed = await _vector_index.remove(namespace, ids)
+        return {"ok": True, "removed": removed}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@registry.tool(
+    "purge",
+    "Remove ALL vectors in a namespace. Use for bulk cleanup (e.g., agent deletion).",
+    {
+        "type": "object",
+        "properties": {
+            "namespace": {
+                "type": "string",
+                "description": "Namespace to purge completely",
+            },
+        },
+        "required": ["namespace"],
+    },
+)
+async def handle_purge_tool(arguments: dict) -> dict:
+    if _vector_index is None:
+        return {"error": "Index not initialized or disabled"}
+
+    namespace = arguments.get("namespace", "")
+    if not namespace:
+        return {"error": "namespace is required"}
+
+    try:
+        removed = await _vector_index.purge_namespace(namespace)
         return {"ok": True, "removed": removed}
     except Exception as e:
         return {"error": str(e)}

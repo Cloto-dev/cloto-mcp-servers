@@ -1379,6 +1379,19 @@ async def do_delete_memory(memory_id: int, agent_id: str = "") -> dict:
     await db.commit()
     if cursor.rowcount == 0:
         return {"error": f"Memory {memory_id} not found or not owned by agent"}
+
+    # v2.3.5: Remove from remote vector index
+    if VECTOR_SEARCH_MODE == "remote" and _embedding_client and _embedding_client._http_url:
+        ns = f"cpersona:{agent_id}" if agent_id else "cpersona:"
+        try:
+            base_url = _embedding_client._http_url.rsplit("/", 1)[0]
+            await _embedding_client._client.post(
+                f"{base_url}/remove",
+                json={"namespace": ns, "ids": [f"mem:{memory_id}"]},
+            )
+        except Exception as e:
+            logger.debug("Remote remove failed (non-fatal): %s", e)
+
     return {"ok": True, "deleted_id": memory_id}
 
 
@@ -1396,6 +1409,17 @@ async def do_delete_agent_data(agent_id: str) -> dict:
     prof_cursor = await db.execute("DELETE FROM profiles WHERE agent_id = ?", (agent_id,))
     ep_cursor = await db.execute("DELETE FROM episodes WHERE agent_id = ?", (agent_id,))
     await db.commit()
+
+    # v2.3.5: Purge remote vector index for this agent
+    if VECTOR_SEARCH_MODE == "remote" and _embedding_client and _embedding_client._http_url:
+        try:
+            base_url = _embedding_client._http_url.rsplit("/", 1)[0]
+            await _embedding_client._client.post(
+                f"{base_url}/purge",
+                json={"namespace": f"cpersona:{agent_id}"},
+            )
+        except Exception as e:
+            logger.debug("Remote purge failed (non-fatal): %s", e)
 
     result = {
         "ok": True,
