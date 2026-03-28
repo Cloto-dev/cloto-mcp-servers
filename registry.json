@@ -53,9 +53,9 @@
     {
       "id": "tool.embedding",
       "name": "Embedding",
-      "description": "Vector embedding generation (local ONNX + API providers)",
+      "description": "Vector embedding generation + index/search (local ONNX + API providers)",
       "category": "tool",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "directory": "embedding",
       "dependencies": ["common"],
       "env_vars": [
@@ -205,9 +205,9 @@
     {
       "id": "memory.cpersona",
       "name": "CPersona Memory",
-      "description": "Persistent character persona memory with FTS5 search and anti-contamination",
+      "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.3.0",
+      "version": "2.3.5",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [
