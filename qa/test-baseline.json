@@ -1,5 +1,5 @@
 {
-  "pytest_test_count": 96,
-  "updated_at": "2026-03-27",
-  "updated_by": "cpersona-v2.3.4-scalability"
+  "pytest_test_count": 101,
+  "updated_at": "2026-03-28",
+  "updated_by": "embedding-v0.2.0-vector-index"
 }

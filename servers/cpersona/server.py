@@ -87,6 +87,10 @@ RESOLVED_DECAY_FACTOR = float(os.environ.get("CPERSONA_RESOLVED_DECAY_FACTOR", "
 TASK_MAX_RETRIES = int(os.environ.get("CPERSONA_TASK_MAX_RETRIES", "3"))
 TASK_RETRY_DELAY = int(os.environ.get("CPERSONA_TASK_RETRY_DELAY", "30"))  # seconds
 
+# Remote vector search (v2.3.5)
+VECTOR_SEARCH_MODE = os.environ.get("CPERSONA_VECTOR_SEARCH_MODE", "local")  # local | remote
+STORE_BLOB = os.environ.get("CPERSONA_STORE_BLOB", "true").lower() == "true"
+
 # ============================================================
 # Embedding Client
 # ============================================================
@@ -644,7 +648,7 @@ async def do_store(agent_id: str, message: dict) -> dict:
 
     # Compute embedding before insert (so we can include it in the INSERT)
     embedding_blob = None
-    if _embedding_client:
+    if _embedding_client and (VECTOR_SEARCH_MODE == "local" or STORE_BLOB):
         try:
             embeddings = await _embedding_client.embed([content])
             if embeddings and embeddings[0]:
@@ -658,6 +662,28 @@ async def do_store(agent_id: str, message: dict) -> dict:
         (agent_id, msg_id, content, source, timestamp, metadata, embedding_blob),
     )
     await db.commit()
+
+    # v2.3.5: Remote index for centralized vector search
+    if VECTOR_SEARCH_MODE == "remote" and _embedding_client and _embedding_client._http_url:
+        try:
+            # Get the inserted row ID
+            row = await db.execute_fetchall(
+                "SELECT id FROM memories WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
+                (agent_id,),
+            )
+            if row:
+                mem_id = row[0][0]
+                base_url = _embedding_client._http_url.rsplit("/", 1)[0]  # strip /embed
+                await _embedding_client._client.post(
+                    f"{base_url}/index",
+                    json={
+                        "namespace": f"cpersona:{agent_id}",
+                        "items": [{"id": f"mem:{mem_id}", "text": content}],
+                    },
+                )
+        except Exception as e:
+            logger.debug("Remote index failed (non-fatal): %s", e)
+
     return {"ok": True}
 
 
@@ -760,6 +786,68 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
 
 async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, limit: int) -> list[dict]:
     """Search memories and episodes using vector cosine similarity."""
+
+    # v2.3.5: Remote vector search via embedding server
+    if VECTOR_SEARCH_MODE == "remote" and _embedding_client and _embedding_client._http_url:
+        try:
+            base_url = _embedding_client._http_url.rsplit("/", 1)[0]
+            resp = await _embedding_client._client.post(
+                f"{base_url}/search",
+                json={
+                    "namespace": f"cpersona:{agent_id}",
+                    "query": query,
+                    "limit": limit,
+                    "min_similarity": VECTOR_MIN_SIMILARITY,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = []
+            for hit in data.get("results", []):
+                # Parse "mem:{id}" or "ep:{id}" format
+                raw_id = hit["id"]
+                score = hit["score"]
+                if raw_id.startswith("mem:"):
+                    mem_id = int(raw_id[4:])
+                    row = await db.execute_fetchall(
+                        "SELECT msg_id, content, source, timestamp FROM memories WHERE id = ?",
+                        (mem_id,),
+                    )
+                    if row:
+                        results.append(
+                            {
+                                "id": mem_id,
+                                "_rid": ("mem", mem_id),
+                                "_cosine": score,
+                                "msg_id": row[0][0],
+                                "content": row[0][1],
+                                "source": row[0][2],
+                                "timestamp": row[0][3],
+                            }
+                        )
+                elif raw_id.startswith("ep:"):
+                    ep_id = int(raw_id[3:])
+                    row = await db.execute_fetchall(
+                        "SELECT summary, start_time, resolved FROM episodes WHERE id = ?",
+                        (ep_id,),
+                    )
+                    if row:
+                        results.append(
+                            {
+                                "id": ep_id,
+                                "_rid": ("ep", ep_id),
+                                "_cosine": score,
+                                "content": f"[Episode] {row[0][0]}",
+                                "source": {"System": "episode"},
+                                "timestamp": row[0][1] or "",
+                                "_resolved": bool(row[0][2]),
+                            }
+                        )
+            return results
+        except Exception as e:
+            logger.warning("Remote vector search failed, falling back to local: %s", e)
+
+    # Local vector search (default or fallback)
     import numpy as np
 
     # 1. Compute query embedding

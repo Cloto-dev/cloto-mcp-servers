@@ -3,12 +3,15 @@ Cloto MCP Server: Vector Embedding
 Pluggable embedding provider with HTTP endpoint for inter-server communication.
 Providers: api_openai (OpenAI-compatible API), onnx_miniml (local MiniLM ONNX).
 
+v0.2.0: Vector Index — persistent index + search endpoints for centralized vector search.
+
 Design: docs/CPERSONA_MEMORY_DESIGN.md Section 5
 """
 
 import asyncio
 import logging
 import os
+import struct
 import sys
 from abc import ABC, abstractmethod
 
@@ -35,6 +38,10 @@ EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "")
 EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL", "https://api.openai.com/v1/embeddings")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "")  # provider-dependent default
 EMBEDDING_TIMEOUT = int(os.environ.get("EMBEDDING_TIMEOUT_SECS", "30"))
+
+# Vector Index (v0.2.0)
+EMBEDDING_INDEX_ENABLED = os.environ.get("EMBEDDING_INDEX_ENABLED", "true").lower() == "true"
+EMBEDDING_INDEX_DB_PATH = os.environ.get("EMBEDDING_INDEX_DB_PATH", "data/embedding_index.db")
 
 # ONNX-specific — resolve relative paths against CLOTO_PROJECT_DIR when running
 # inside a sandbox (isolation changes the working directory).
@@ -247,6 +254,152 @@ class OnnxMiniLMProvider(EmbeddingProvider):
 
 
 # ============================================================
+# Vector Index (v0.2.0)
+# ============================================================
+
+
+class VectorIndex:
+    """Persistent vector index with in-memory search.
+
+    Stores vectors in SQLite for durability, loads into memory for fast
+    brute-force dot product search. Namespaced to support multiple consumers.
+    """
+
+    def __init__(self, db_path: str):
+        self._db_path = db_path
+        self._db = None
+        # In-memory index: {namespace: {item_id: np.array(float32)}}
+        self._index: dict[str, dict[str, np.ndarray]] = {}
+
+    async def initialize(self) -> None:
+        import aiosqlite
+
+        db_dir = os.path.dirname(self._db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+
+        self._db = await aiosqlite.connect(self._db_path)
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
+        await self._db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS vectors (
+                namespace TEXT NOT NULL,
+                item_id   TEXT NOT NULL,
+                vector    BLOB NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (namespace, item_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_vectors_ns ON vectors (namespace);
+            """
+        )
+        await self._db.commit()
+
+        # Load all vectors into memory
+        rows = await self._db.execute_fetchall("SELECT namespace, item_id, vector FROM vectors")
+        for ns, item_id, blob in rows:
+            if ns not in self._index:
+                self._index[ns] = {}
+            self._index[ns][item_id] = np.frombuffer(blob, dtype=np.float32).copy()
+
+        total = sum(len(v) for v in self._index.values())
+        logger.info("VectorIndex loaded: %d vectors across %d namespaces", total, len(self._index))
+
+    async def index(self, namespace: str, items: list[dict], provider: "EmbeddingProvider") -> int:
+        """Index items. Each item has 'id' and 'text'. Returns count indexed."""
+        if not self._db:
+            raise RuntimeError("VectorIndex not initialized")
+
+        texts = [item["text"] for item in items]
+        embeddings = await provider.embed(texts)
+
+        if namespace not in self._index:
+            self._index[namespace] = {}
+
+        indexed = 0
+        for item, emb in zip(items, embeddings):
+            item_id = item["id"]
+            vec = np.array(emb, dtype=np.float32)
+            blob = struct.pack(f"<{len(vec)}f", *vec)
+
+            await self._db.execute(
+                "INSERT OR REPLACE INTO vectors (namespace, item_id, vector) VALUES (?, ?, ?)",
+                (namespace, item_id, blob),
+            )
+            self._index[namespace][item_id] = vec
+            indexed += 1
+
+        await self._db.commit()
+        return indexed
+
+    async def search(
+        self,
+        namespace: str,
+        query: str,
+        limit: int,
+        min_similarity: float,
+        provider: "EmbeddingProvider",
+    ) -> list[dict]:
+        """Search for similar vectors. Returns [{id, score}, ...] sorted by score desc."""
+        ns_index = self._index.get(namespace)
+        if not ns_index:
+            return []
+
+        embeddings = await provider.embed([query])
+        if not embeddings or not embeddings[0]:
+            return []
+
+        query_vec = np.array(embeddings[0], dtype=np.float32)
+        query_dim = len(query_vec)
+
+        candidates = []
+        for item_id, vec in ns_index.items():
+            if len(vec) != query_dim:
+                continue
+            sim = float(np.dot(query_vec, vec))
+            if sim >= min_similarity:
+                candidates.append((sim, item_id))
+
+        # Top-K via heap
+        import heapq
+
+        top_k = heapq.nlargest(limit, candidates, key=lambda x: x[0])
+        return [{"id": item_id, "score": round(score, 4)} for score, item_id in top_k]
+
+    async def remove(self, namespace: str, ids: list[str]) -> int:
+        """Remove items from index. Returns count removed."""
+        if not self._db:
+            raise RuntimeError("VectorIndex not initialized")
+
+        removed = 0
+        ns_index = self._index.get(namespace, {})
+        for item_id in ids:
+            cursor = await self._db.execute(
+                "DELETE FROM vectors WHERE namespace = ? AND item_id = ?",
+                (namespace, item_id),
+            )
+            if cursor.rowcount > 0:
+                removed += 1
+            ns_index.pop(item_id, None)
+
+        await self._db.commit()
+        return removed
+
+    async def count(self, namespace: str) -> int:
+        """Count vectors in a namespace."""
+        return len(self._index.get(namespace, {}))
+
+    async def shutdown(self) -> None:
+        if self._db:
+            await self._db.close()
+            self._db = None
+        self._index.clear()
+
+
+_vector_index: VectorIndex | None = None
+
+
+# ============================================================
 # Provider Factory
 # ============================================================
 
@@ -307,10 +460,92 @@ async def handle_embed(request: web.Request) -> web.Response:
         return web.json_response({"error": f"Embedding failed: {e}"}, status=500)
 
 
+async def handle_index(request: web.Request) -> web.Response:
+    """POST /index — Index vectors for later search."""
+    if _provider is None or _vector_index is None:
+        return web.json_response({"error": "Not initialized"}, status=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    namespace = body.get("namespace", "default")
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        return web.json_response({"error": "'items' must be a non-empty array"}, status=400)
+    if len(items) > 100:
+        return web.json_response({"error": "Batch size exceeds limit (max 100)"}, status=400)
+
+    for item in items:
+        if not isinstance(item, dict) or "id" not in item or "text" not in item:
+            return web.json_response({"error": "Each item must have 'id' and 'text'"}, status=400)
+
+    try:
+        indexed = await _vector_index.index(namespace, items, _provider)
+        return web.json_response({"ok": True, "indexed": indexed})
+    except Exception as e:
+        logger.exception("Index failed")
+        return web.json_response({"error": f"Index failed: {e}"}, status=500)
+
+
+async def handle_search(request: web.Request) -> web.Response:
+    """POST /search — Search indexed vectors by similarity."""
+    if _provider is None or _vector_index is None:
+        return web.json_response({"error": "Not initialized"}, status=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    namespace = body.get("namespace", "default")
+    query = body.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return web.json_response({"error": "'query' must be a non-empty string"}, status=400)
+
+    limit = min(int(body.get("limit", 10)), 500)
+    min_similarity = float(body.get("min_similarity", 0.3))
+
+    try:
+        results = await _vector_index.search(namespace, query, limit, min_similarity, _provider)
+        return web.json_response({"results": results})
+    except Exception as e:
+        logger.exception("Search failed")
+        return web.json_response({"error": f"Search failed: {e}"}, status=500)
+
+
+async def handle_remove(request: web.Request) -> web.Response:
+    """POST /remove — Remove vectors from index."""
+    if _vector_index is None:
+        return web.json_response({"error": "Not initialized"}, status=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    namespace = body.get("namespace", "default")
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        return web.json_response({"error": "'ids' must be a non-empty array"}, status=400)
+
+    try:
+        removed = await _vector_index.remove(namespace, ids)
+        return web.json_response({"ok": True, "removed": removed})
+    except Exception as e:
+        logger.exception("Remove failed")
+        return web.json_response({"error": f"Remove failed: {e}"}, status=500)
+
+
 async def run_http_server(port: int) -> None:
     """Run the HTTP embedding endpoint alongside MCP stdio."""
     app = web.Application()
     app.router.add_post("/embed", handle_embed)
+    if EMBEDDING_INDEX_ENABLED and _vector_index is not None:
+        app.router.add_post("/index", handle_index)
+        app.router.add_post("/search", handle_search)
+        app.router.add_post("/remove", handle_remove)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -368,13 +603,140 @@ async def handle_embed_tool(arguments: dict) -> dict:
         return {"error": str(e)}
 
 
+@registry.tool(
+    "index",
+    "Index text items for vector similarity search. Each item gets embedded and stored persistently.",
+    {
+        "type": "object",
+        "properties": {
+            "namespace": {
+                "type": "string",
+                "description": "Namespace for isolation (e.g., 'cpersona:agent-id')",
+                "default": "default",
+            },
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "text": {"type": "string"},
+                    },
+                    "required": ["id", "text"],
+                },
+                "description": "Items to index (max 100)",
+            },
+        },
+        "required": ["items"],
+    },
+)
+async def handle_index_tool(arguments: dict) -> dict:
+    if _provider is None or _vector_index is None:
+        return {"error": "Not initialized or index disabled"}
+
+    namespace = arguments.get("namespace", "default")
+    items = arguments.get("items", [])
+    if not items or len(items) > 100:
+        return {"error": "items must be 1-100 entries"}
+
+    try:
+        indexed = await _vector_index.index(namespace, items, _provider)
+        return {"ok": True, "indexed": indexed}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@registry.tool(
+    "search",
+    "Search indexed vectors by semantic similarity. Returns top-K results with scores.",
+    {
+        "type": "object",
+        "properties": {
+            "namespace": {
+                "type": "string",
+                "description": "Namespace to search within",
+                "default": "default",
+            },
+            "query": {
+                "type": "string",
+                "description": "Search query text",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max results to return (default: 10)",
+                "default": 10,
+            },
+            "min_similarity": {
+                "type": "number",
+                "description": "Minimum cosine similarity threshold (default: 0.3)",
+                "default": 0.3,
+            },
+        },
+        "required": ["query"],
+    },
+)
+async def handle_search_tool(arguments: dict) -> dict:
+    if _provider is None or _vector_index is None:
+        return {"error": "Not initialized or index disabled"}
+
+    namespace = arguments.get("namespace", "default")
+    query = arguments.get("query", "")
+    limit = min(int(arguments.get("limit", 10)), 500)
+    min_similarity = float(arguments.get("min_similarity", 0.3))
+
+    if not query.strip():
+        return {"error": "query must be non-empty"}
+
+    try:
+        results = await _vector_index.search(namespace, query, limit, min_similarity, _provider)
+        return {"results": results}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@registry.tool(
+    "remove",
+    "Remove items from the vector index by ID.",
+    {
+        "type": "object",
+        "properties": {
+            "namespace": {
+                "type": "string",
+                "description": "Namespace containing the items",
+                "default": "default",
+            },
+            "ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Item IDs to remove",
+            },
+        },
+        "required": ["ids"],
+    },
+)
+async def handle_remove_tool(arguments: dict) -> dict:
+    if _vector_index is None:
+        return {"error": "Index not initialized or disabled"}
+
+    namespace = arguments.get("namespace", "default")
+    ids = arguments.get("ids", [])
+    if not ids:
+        return {"error": "ids must be non-empty"}
+
+    try:
+        removed = await _vector_index.remove(namespace, ids)
+        return {"ok": True, "removed": removed}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ============================================================
 # Main
 # ============================================================
 
 
 async def main():
-    global _provider
+    global _provider, _vector_index
 
     logging.basicConfig(
         level=logging.INFO,
@@ -382,13 +744,19 @@ async def main():
     )
 
     logger.info(
-        "Starting embedding server (provider=%s, http_port=%d)",
+        "Starting embedding server (provider=%s, http_port=%d, index=%s)",
         EMBEDDING_PROVIDER,
         EMBEDDING_HTTP_PORT,
+        "enabled" if EMBEDDING_INDEX_ENABLED else "disabled",
     )
 
     _provider = create_provider()
     await _provider.initialize()
+
+    # Initialize vector index if enabled
+    if EMBEDDING_INDEX_ENABLED:
+        _vector_index = VectorIndex(EMBEDDING_INDEX_DB_PATH)
+        await _vector_index.initialize()
 
     # Start HTTP endpoint as background task
     http_task = asyncio.create_task(run_http_server(EMBEDDING_HTTP_PORT))
@@ -406,6 +774,8 @@ async def main():
             await http_task
         except asyncio.CancelledError:
             pass
+        if _vector_index:
+            await _vector_index.shutdown()
         await _provider.shutdown()
         logger.info("Embedding server shut down")
 

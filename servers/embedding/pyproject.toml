@@ -1,13 +1,14 @@
 [project]
 name = "cloto-mcp-embedding"
-version = "0.1.0"
-description = "Cloto MCP Server: Vector embedding generation (local ONNX + API providers)"
+version = "0.2.0"
+description = "Cloto MCP Server: Vector embedding generation + index/search (local ONNX + API providers)"
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
     "httpx>=0.27.0",
     "aiohttp>=3.9.0",
     "numpy>=1.24.0",
+    "aiosqlite>=0.20.0",
 ]
 
 [project.optional-dependencies]
