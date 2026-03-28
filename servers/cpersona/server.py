@@ -446,7 +446,7 @@ _task_queue: MemoryTaskQueue | None = None
 # Database
 # ============================================================
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -511,7 +511,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
     summary,
     keywords,
     content=episodes,
-    content_rowid=id
+    content_rowid=id,
+    tokenize='trigram'
 );
 
 -- Sync triggers
@@ -536,7 +537,8 @@ END;
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
     content=memories,
-    content_rowid=id
+    content_rowid=id,
+    tokenize='trigram'
 );
 
 CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
@@ -591,6 +593,32 @@ async def get_db() -> aiosqlite.Connection:
             await _db.execute("INSERT OR IGNORE INTO memories_fts(rowid, content) SELECT id, content FROM memories")
         except Exception:
             pass  # Table may not exist if FTS disabled, or already populated
+
+    # v2.3.6: Rebuild FTS tables with trigram tokenizer for CJK support
+    if current < 5 and FTS_ENABLED:
+        try:
+            # Drop old FTS tables and triggers, then re-create with trigram
+            await _db.executescript(
+                """
+                DROP TRIGGER IF EXISTS episodes_ai;
+                DROP TRIGGER IF EXISTS episodes_ad;
+                DROP TRIGGER IF EXISTS episodes_au;
+                DROP TRIGGER IF EXISTS memories_fts_ai;
+                DROP TRIGGER IF EXISTS memories_fts_ad;
+                DROP TABLE IF EXISTS episodes_fts;
+                DROP TABLE IF EXISTS memories_fts;
+                """
+            )
+            # Re-create with trigram tokenizer (done by FTS_SQL above, but need to re-run)
+            await _db.executescript(FTS_SQL)
+            # Backfill
+            await _db.execute(
+                "INSERT OR IGNORE INTO episodes_fts(rowid, summary, keywords) "
+                "SELECT id, summary, keywords FROM episodes"
+            )
+            await _db.execute("INSERT OR IGNORE INTO memories_fts(rowid, content) SELECT id, content FROM memories")
+        except Exception as e:
+            logger.warning("FTS trigram migration failed (non-fatal): %s", e)
 
     if current < SCHEMA_VERSION:
         await _db.execute(
