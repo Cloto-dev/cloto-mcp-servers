@@ -2,5 +2,20 @@
   "$schema": "https://github.com/Cloto-dev/ClotoCore/blob/master/qa/issue-registry.schema.md",
   "version": "1.0",
   "description": "Mechanical verification registry for documented issues. Source of truth for bug existence proof.",
-  "issues": []
+  "issues": [
+    {
+      "id": "bug-001",
+      "title": "export_memories omits resolved field from episodes",
+      "severity": "MEDIUM",
+      "status": "fixed",
+      "file": "servers/cpersona/server.py",
+      "description": "export_memories SELECT for episodes does not include the resolved column. Exported JSONL episodes lose their completion status. import_memories also does not restore resolved, so round-trip export/import resets all episodes to resolved=0.",
+      "expected": "present",
+      "check": {
+        "type": "grep",
+        "file": "servers/cpersona/server.py",
+        "pattern": "resolved.*_type.*episode|episode.*resolved"
+      }
+    }
+  ]
 }

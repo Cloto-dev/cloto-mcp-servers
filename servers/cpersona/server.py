@@ -1551,7 +1551,7 @@ async def do_export_memories(agent_id: str, output_path: str, include_embeddings
 
         # Episodes
         rows = await db.execute_fetchall(
-            "SELECT id, agent_id, summary, keywords, start_time, end_time, embedding, created_at"
+            "SELECT id, agent_id, summary, keywords, start_time, end_time, embedding, created_at, resolved"
             f" FROM episodes{agent_filter} ORDER BY id",
             agent_params,
         )
@@ -1565,6 +1565,7 @@ async def do_export_memories(agent_id: str, output_path: str, include_embeddings
                 "start_time": row[4],
                 "end_time": row[5],
                 "created_at": row[7],
+                "resolved": bool(row[8]) if row[8] else False,
             }
             if include_embeddings and row[6]:
                 record["embedding_b64"] = base64.b64encode(row[6]).decode("ascii")
@@ -1680,10 +1681,11 @@ async def do_import_memories(input_path: str, target_agent_id: str = "", dry_run
                     keywords = record.get("keywords", "")
                     start_time = record.get("start_time")
                     end_time = record.get("end_time")
+                    resolved = 1 if record.get("resolved") else 0
                     await db.execute(
-                        "INSERT INTO episodes (agent_id, summary, keywords, start_time, end_time)"
-                        " VALUES (?, ?, ?, ?, ?)",
-                        (aid, summary, keywords, start_time, end_time),
+                        "INSERT INTO episodes (agent_id, summary, keywords, start_time, end_time, resolved)"
+                        " VALUES (?, ?, ?, ?, ?, ?)",
+                        (aid, summary, keywords, start_time, end_time, resolved),
                     )
                 imported_episodes += 1
 

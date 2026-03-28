@@ -196,3 +196,59 @@ async def test_import_missing_file():
     """Import should return error for missing file."""
     result = await do_import_memories("/nonexistent/path.jsonl")
     assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_export_episode_resolved_roundtrip():
+    """Export should include resolved field; import should restore it (bug-001)."""
+    from cpersona.server import do_archive_episode
+
+    # Create episodes with different resolved states
+    await do_archive_episode(
+        agent_id="agent.test",
+        history=[],
+        summary="Completed task: fixed the bug",
+        keywords="bug fix completed",
+        resolved=True,
+    )
+    await do_archive_episode(
+        agent_id="agent.test",
+        history=[],
+        summary="Ongoing discussion about architecture",
+        keywords="architecture design ongoing",
+        resolved=False,
+    )
+
+    export_path = os.path.join(_tmpdir, "resolved_test.jsonl")
+
+    # Export
+    result = await do_export_memories("agent.test", export_path)
+    assert result["episodes"] == 2
+
+    # Verify resolved in export
+    with open(export_path, encoding="utf-8") as f:
+        lines = [json.loads(line) for line in f if line.strip()]
+    episodes = [l for l in lines if l.get("_type") == "episode"]
+    assert len(episodes) == 2
+    resolved_values = {e["summary"][:10]: e["resolved"] for e in episodes}
+    assert resolved_values["Completed "] is True
+    assert resolved_values["Ongoing di"] is False
+
+    # Clear and re-import
+    db = await get_db()
+    await db.execute("DELETE FROM episodes")
+    await db.commit()
+
+    result = await do_import_memories(export_path)
+    assert result["imported_episodes"] == 2
+
+    # Verify resolved preserved after import
+    rows = await db.execute_fetchall(
+        "SELECT summary, resolved FROM episodes WHERE agent_id = 'agent.test' ORDER BY id"
+    )
+    assert len(rows) == 2
+    resolved_map = {r[0][:10]: r[1] for r in rows}
+    assert resolved_map["Completed "] == 1
+    assert resolved_map["Ongoing di"] == 0
+
+    os.remove(export_path)
