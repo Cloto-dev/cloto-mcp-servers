@@ -59,9 +59,12 @@ pip install -r requirements.lock
 }
 ```
 
+> **Windows**: use `.venv/Scripts/python.exe` instead of `.venv/bin/python`, and `C:/Users/yourname/.claude/cpersona.db` for the DB path.
+
 **Claude Code**:
 
 ```bash
+# macOS / Linux
 claude mcp add-json embedding '{
   "type": "stdio",
   "command": "/path/to/servers/.venv/bin/python",
