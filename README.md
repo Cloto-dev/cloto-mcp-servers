@@ -1,17 +1,102 @@
 # cloto-mcp-servers
 
-MCP/MGP server collection for the [ClotoCore](https://github.com/Cloto-dev/ClotoCore) platform.
+MCP server collection for the [ClotoCore](https://github.com/Cloto-dev/ClotoCore) platform.
 
-Extracted from the ClotoCore monorepo at commit `f9ea920`.
+## CPersona — AI Memory Server
 
-## Servers
+**CPersona** (`servers/cpersona/`) is an MCP Memory Server that gives Claude persistent memory.
+
+- 3-layer hybrid search (vector + FTS5 full-text + keyword)
+- Episodic memory (automatic conversation summarization) and profile memory (user attribute accumulation)
+- Confidence Score with time decay
+- Full namespace isolation between agents
+- stdio + Streamable HTTP transport
+- Single-file SQLite DB / minimal dependencies (Python + numpy)
+
+**License: MIT** — free to use from any MCP host.
+
+### Quick Start (Claude Desktop / Claude Code)
+
+```bash
+git clone https://github.com/Cloto-dev/cloto-mcp-servers.git
+cd cloto-mcp-servers/servers
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+
+# macOS / Linux
+# source .venv/bin/activate
+
+pip install -r requirements.lock
+```
+
+**Claude Desktop** — add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "embedding": {
+      "command": "/path/to/servers/.venv/bin/python",
+      "args": ["/path/to/servers/embedding/server.py"],
+      "env": {
+        "EMBEDDING_PROVIDER": "onnx_miniml",
+        "EMBEDDING_HTTP_PORT": "8401"
+      }
+    },
+    "cpersona": {
+      "command": "/path/to/servers/.venv/bin/python",
+      "args": ["/path/to/servers/cpersona/server.py"],
+      "env": {
+        "CPERSONA_DB_PATH": "/home/yourname/.claude/cpersona.db",
+        "CPERSONA_EMBEDDING_MODE": "http",
+        "CPERSONA_EMBEDDING_URL": "http://127.0.0.1:8401/embed",
+        "CPERSONA_VECTOR_SEARCH_MODE": "remote",
+        "CPERSONA_TASK_QUEUE_ENABLED": "false"
+      }
+    }
+  }
+}
+```
+
+**Claude Code**:
+
+```bash
+claude mcp add-json embedding '{
+  "type": "stdio",
+  "command": "/path/to/servers/.venv/bin/python",
+  "args": ["/path/to/servers/embedding/server.py"],
+  "env": {
+    "EMBEDDING_PROVIDER": "onnx_miniml",
+    "EMBEDDING_HTTP_PORT": "8401"
+  }
+}' -s user
+
+claude mcp add-json cpersona '{
+  "type": "stdio",
+  "command": "/path/to/servers/.venv/bin/python",
+  "args": ["/path/to/servers/cpersona/server.py"],
+  "env": {
+    "CPERSONA_DB_PATH": "/home/yourname/.claude/cpersona.db",
+    "CPERSONA_EMBEDDING_MODE": "http",
+    "CPERSONA_EMBEDDING_URL": "http://127.0.0.1:8401/embed",
+    "CPERSONA_VECTOR_SEARCH_MODE": "remote",
+    "CPERSONA_TASK_QUEUE_ENABLED": "false"
+  }
+}' -s user
+```
+
+Adjust paths to match your environment. For detailed setup instructions, see the [Zenn Book Ch.2](https://zenn.dev/clotodev/books/claude-memory-mcp-server/viewer/ch02-quickstart).
+
+## All Servers
 
 | ID | Type | Description |
 |----|------|-------------|
+| `memory.cpersona` | Memory | CPersona persistent memory with FTS5 search (MIT) |
+| `tool.embedding` | Tool | Vector embedding generation (ONNX + API providers) |
 | `tool.terminal` | Tool | Sandboxed command execution |
 | `tool.agent_utils` | Tool | Deterministic utilities (time, math, UUID, units, encode/decode) |
 | `tool.cron` | Tool | CRON job management |
-| `tool.embedding` | Tool | Vector embedding generation (ONNX + API providers) |
 | `tool.websearch` | Tool | Web search integration (SearXNG, Tavily, DuckDuckGo) |
 | `tool.research` | Tool | Research synthesis with search and LLM delegation |
 | `tool.imagegen` | Tool | Stable Diffusion image generation |
@@ -19,16 +104,14 @@ Extracted from the ClotoCore monorepo at commit `f9ea920`.
 | `mind.deepseek` | Mind | DeepSeek reasoning engine |
 | `mind.claude` | Mind | Claude/Anthropic reasoning engine |
 | `mind.ollama` | Mind | Ollama local LLM |
-| `memory.cpersona` | Memory | CPersona persistent memory with FTS5 search (MIT) |
 | `vision.gaze_webcam` | Vision | Webcam gaze tracking |
 | `vision.capture` | Vision | Image capture with Ollama + OCR |
 | `voice.stt` | Voice | Speech-to-text (Whisper) |
 | `output.avatar` | Output | VRM expression, idle behavior, and VOICEVOX TTS (Rust) |
 
-## Setup
+## Setup (all servers)
 
 ```bash
-# Create virtual environment
 cd servers
 python -m venv .venv
 
@@ -37,7 +120,6 @@ source .venv/Scripts/activate
 # Activate (Linux/macOS)
 # source .venv/bin/activate
 
-# Install dependencies
 pip install --upgrade pip
 for d in */; do [ -f "$d/pyproject.toml" ] && pip install "$d"; done
 ```
