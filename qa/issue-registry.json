@@ -16,6 +16,48 @@
         "file": "servers/cpersona/server.py",
         "pattern": "resolved.*_type.*episode|episode.*resolved"
       }
+    },
+    {
+      "id": "bug-002",
+      "title": "remote index uses SELECT instead of cursor.lastrowid",
+      "severity": "HIGH",
+      "status": "open",
+      "file": "servers/cpersona/server.py",
+      "description": "do_store() retrieves the last inserted memory ID via SELECT ... ORDER BY id DESC LIMIT 1 instead of cursor.lastrowid. Under concurrent inserts for the same agent_id, this could return the wrong ID for remote vector index registration.",
+      "expected": "present",
+      "check": {
+        "type": "grep",
+        "file": "servers/cpersona/server.py",
+        "pattern": "SELECT id FROM memories WHERE agent_id.*ORDER BY id DESC LIMIT 1"
+      }
+    },
+    {
+      "id": "bug-003",
+      "title": "calibrate_threshold modifies global VECTOR_MIN_SIMILARITY without agent isolation",
+      "severity": "HIGH",
+      "status": "open",
+      "file": "servers/cpersona/server.py",
+      "description": "do_calibrate_threshold() writes to the global VECTOR_MIN_SIMILARITY variable. In a multi-agent environment, calibrating for agent A changes the threshold for all subsequent recall calls including agent B. The threshold should be per-agent or protected by a lock.",
+      "expected": "present",
+      "check": {
+        "type": "grep",
+        "file": "servers/cpersona/server.py",
+        "pattern": "global VECTOR_MIN_SIMILARITY"
+      }
+    },
+    {
+      "id": "bug-004",
+      "title": "episode recall results lack msg_id, invisible in messages output",
+      "severity": "HIGH",
+      "status": "open",
+      "file": "servers/cpersona/server.py",
+      "description": "_search_episodes_fts() and _search_vector() episode results do not include a msg_id field. In do_recall(), the condition 'if r.get(\"msg_id\")' is False for episodes, so msg[\"id\"] is never set. Episode results in the messages array have no identifier, making them unaddressable by callers.",
+      "expected": "present",
+      "check": {
+        "type": "grep",
+        "file": "servers/cpersona/server.py",
+        "pattern": "if r\\.get\\(\"msg_id\"\\)"
+      }
     }
   ]
 }

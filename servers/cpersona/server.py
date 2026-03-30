@@ -91,6 +91,20 @@ TASK_RETRY_DELAY = int(os.environ.get("CPERSONA_TASK_RETRY_DELAY", "30"))  # sec
 VECTOR_SEARCH_MODE = os.environ.get("CPERSONA_VECTOR_SEARCH_MODE", "local")  # local | remote
 STORE_BLOB = os.environ.get("CPERSONA_STORE_BLOB", "true").lower() == "true"
 
+# Auto-calibration (v2.3.7)
+AUTO_CALIBRATE = os.environ.get("CPERSONA_AUTO_CALIBRATE", "false").lower() == "true"
+CALIBRATE_SAMPLE_SIZE = int(os.environ.get("CPERSONA_CALIBRATE_SAMPLE_SIZE", "200"))
+CALIBRATE_Z_FACTOR = float(os.environ.get("CPERSONA_CALIBRATE_Z_FACTOR", "1.0"))
+CALIBRATE_FLOOR = float(os.environ.get("CPERSONA_CALIBRATE_FLOOR", "0.05"))
+
+# Autocut (v2.5)
+AUTOCUT_ENABLED = os.environ.get("CPERSONA_AUTOCUT_ENABLED", "false").lower() == "true"
+
+# Recall mode (v2.5)
+RECALL_MODE = os.environ.get("CPERSONA_RECALL_MODE", "cascade")  # cascade | rrf
+RRF_K = max(1, int(os.environ.get("CPERSONA_RRF_K", "60")))
+RRF_THRESHOLD_FACTOR = float(os.environ.get("CPERSONA_RRF_THRESHOLD_FACTOR", "0.5"))
+
 # ============================================================
 # Embedding Client
 # ============================================================
@@ -715,13 +729,14 @@ async def do_store(agent_id: str, message: dict) -> dict:
     return {"ok": True}
 
 
-async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -> dict:
-    """Recall relevant memories using multi-strategy search."""
-    db = await get_db()
+async def _recall_cascade(
+    db, agent_id: str, query: str, limit: int, deep: bool,
+) -> list[dict]:
+    """Original cascading recall: stages fill remaining slots sequentially."""
     results: list[dict] = []
     seen_ids: set = set()
 
-    # Strategy 0: Vector search (if embedding available and query non-empty)
+    # Strategy 0: Vector search
     if _embedding_client and query.strip():
         vector_results = await _search_vector(db, agent_id, query, limit)
         for row in vector_results:
@@ -730,7 +745,7 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
                 results.append(row)
                 seen_ids.add(rid)
 
-    # Strategy 1: FTS5 episode search (if enabled and query non-empty)
+    # Strategy 1: FTS5 episode search
     if FTS_ENABLED and query.strip():
         fts_results = await _search_episodes_fts(db, agent_id, query, limit)
         for row in fts_results:
@@ -745,7 +760,6 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
         (agent_id,),
     )
     for (profile_content,) in profile_rows:
-        # Inject profile as a system-context memory
         results.append(
             {
                 "id": -1,
@@ -755,7 +769,7 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
             }
         )
 
-    # Strategy 3: Keyword match on memories (2.2 fallback)
+    # Strategy 3: Keyword match on memories
     remaining = max(0, limit - len(results))
     if remaining > 0:
         memory_rows = await _search_memories_keyword(db, agent_id, query, remaining)
@@ -765,6 +779,109 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
                 results.append(row)
                 seen_ids.add(rid)
 
+    return results
+
+
+async def _recall_rrf(
+    db, agent_id: str, query: str, limit: int, deep: bool,
+) -> list[dict]:
+    """v2.5 RRF recall: run vector and FTS5 independently, merge with
+    Reciprocal Rank Fusion. Avoids cascade's positional bias.
+
+    score(doc) = sum( 1 / (k + rank_i) ) for each retriever that found doc
+    """
+    k = RRF_K
+    doc_map: dict[tuple, dict] = {}  # rid → row dict
+    rrf_scores: dict[tuple, float] = {}  # rid → accumulated RRF score
+
+    # --- Retriever 1: Vector search (independent, up to limit) ---
+    # Phase 3: RRF mode relaxes the similarity threshold for broader coverage
+    rrf_min_sim = VECTOR_MIN_SIMILARITY * RRF_THRESHOLD_FACTOR
+    if _embedding_client:
+        vector_results = await _search_vector(db, agent_id, query, limit, min_similarity=rrf_min_sim)
+        for rank, row in enumerate(vector_results):
+            rid = row.get("_rid", ("mem", row["id"]))
+            if rid not in doc_map:
+                doc_map[rid] = row
+            rrf_scores[rid] = rrf_scores.get(rid, 0.0) + 1.0 / (k + rank + 1)
+
+    # --- Retriever 2: FTS5 episode search (independent, up to limit) ---
+    if FTS_ENABLED:
+        fts_ep_results = await _search_episodes_fts(db, agent_id, query, limit)
+        for rank, row in enumerate(fts_ep_results):
+            rid = ("ep", row["id"])
+            if rid not in doc_map:
+                doc_map[rid] = row
+            rrf_scores[rid] = rrf_scores.get(rid, 0.0) + 1.0 / (k + rank + 1)
+
+    # --- Retriever 3: FTS5 keyword on memories (independent, up to limit) ---
+    if FTS_ENABLED:
+        fts_mem_results = await _search_memories_keyword(db, agent_id, query, limit)
+        for rank, row in enumerate(fts_mem_results):
+            rid = ("mem", row["id"])
+            if rid not in doc_map:
+                doc_map[rid] = row
+            rrf_scores[rid] = rrf_scores.get(rid, 0.0) + 1.0 / (k + rank + 1)
+
+    # --- Merge: sort by RRF score descending, attach score for autocut ---
+    sorted_rids = sorted(rrf_scores, key=rrf_scores.get, reverse=True)
+    results = []
+    for rid in sorted_rids:
+        row = doc_map[rid]
+        row["_rrf_score"] = rrf_scores[rid]
+        results.append(row)
+
+    # --- Profile injection (always, not ranked) ---
+    profile_rows = await db.execute_fetchall(
+        "SELECT content FROM profiles WHERE agent_id = ? ORDER BY updated_at DESC LIMIT 3",
+        (agent_id,),
+    )
+    for (profile_content,) in profile_rows:
+        results.append(
+            {
+                "id": -1,
+                "content": f"[Profile] {profile_content}",
+                "source": {"System": "profile"},
+                "timestamp": "",
+            }
+        )
+
+    return results
+
+
+def _autocut(results: list[dict]) -> list[dict]:
+    """Detect the largest score gap in results and cut below it (Weaviate autocut).
+
+    Looks at _rrf_score (RRF mode) or _cosine (cascade mode) to find a
+    natural breakpoint in the score distribution. Results after the largest
+    gap are removed as noise.
+    """
+    if len(results) < 2:
+        return results
+    scores = [r.get("_rrf_score") or r.get("_cosine") or 0 for r in results]
+    gaps = [scores[i] - scores[i + 1] for i in range(len(scores) - 1)]
+    if not gaps or max(gaps) <= 0:
+        return results
+    cut_idx = max(range(len(gaps)), key=lambda i: gaps[i]) + 1
+    return results[:cut_idx]
+
+
+async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -> dict:
+    """Recall relevant memories using multi-strategy search.
+
+    Supports two modes (CPERSONA_RECALL_MODE):
+    - "cascade" (default): Sequential stages, each filling remaining slots.
+    - "rrf" (v2.5): Run vector and FTS5 independently, merge with
+      Reciprocal Rank Fusion. Avoids the positional disadvantage of
+      cascade ordering.
+    """
+    db = await get_db()
+
+    if RECALL_MODE == "rrf" and query.strip():
+        results = await _recall_rrf(db, agent_id, query, limit, deep)
+    else:
+        results = await _recall_cascade(db, agent_id, query, limit, deep)
+
     # v2.3.2+: Re-rank by confidence score before truncation (if enabled)
     if CONFIDENCE_ENABLED:
         for r in results:
@@ -773,6 +890,10 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
             is_resolved = r.get("_resolved", False)
             r["_confidence_score"] = _compute_confidence(raw_cos, ts, resolved=is_resolved, deep=deep)["score"]
         results.sort(key=lambda r: r.get("_confidence_score", 0), reverse=True)
+
+    # v2.5: Autocut — detect score gap and remove noise results
+    if AUTOCUT_ENABLED:
+        results = _autocut(results)
 
     # Truncate to limit and reverse for chronological order (oldest first for LLM)
     results = results[:limit]
@@ -806,13 +927,14 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
         r.pop("_rid", None)
         r.pop("_cosine", None)
         r.pop("_confidence_score", None)
+        r.pop("_rrf_score", None)
         r.pop("_resolved", None)
         messages.append(msg)
 
     return {"messages": messages}
 
 
-async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, limit: int) -> list[dict]:
+async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, limit: int, min_similarity: float | None = None) -> list[dict]:
     """Search memories and episodes using vector cosine similarity."""
 
     # v2.3.5: Remote vector search via embedding server
@@ -884,11 +1006,12 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
         return []
     query_vec = np.array(embeddings[0], dtype=np.float32)
     query_dim = len(query_vec)
+    effective_min_sim = min_similarity if min_similarity is not None else VECTOR_MIN_SIMILARITY
 
     candidates: list[tuple[float, dict]] = []
     scan_limit = min(MAX_MEMORIES, max(limit * 10, 100))
 
-    # 2. Search memory embeddings
+    # 2. Search memory embeddings (batch matrix multiplication)
     rows = await db.execute_fetchall(
         """SELECT id, msg_id, content, source, timestamp, embedding
            FROM memories
@@ -898,33 +1021,41 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
         (agent_id, scan_limit),
     )
 
-    for row in rows:
-        mem_id, msg_id, content, source, timestamp, blob = row
-        try:
-            mem_vec = np.frombuffer(blob, dtype=np.float32)
-            if len(mem_vec) != query_dim:
-                continue  # Dimension mismatch (provider changed)
-            sim = float(np.dot(query_vec, mem_vec))
-            if sim >= VECTOR_MIN_SIMILARITY:
-                candidates.append(
-                    (
-                        sim,
-                        {
-                            "id": mem_id,
-                            "_rid": ("mem", mem_id),
-                            "_cosine": sim,
-                            "msg_id": msg_id,
-                            "content": content,
-                            "source": source,
-                            "timestamp": timestamp,
-                        },
-                    )
-                )
-        except (ValueError, TypeError) as e:
-            logger.debug("Skipping memory %s: vector decode error: %s", mem_id, e)
-            continue
+    if rows:
+        # Batch decode: collect valid embeddings into a matrix for vectorized cosine
+        valid_rows = []
+        blobs = []
+        for row in rows:
+            blob = row[5]
+            if blob and len(blob) == query_dim * 4:  # float32 = 4 bytes
+                valid_rows.append(row)
+                blobs.append(blob)
 
-    # 3. Search episode embeddings
+        if valid_rows:
+            # Single matrix multiplication: (N, dim) @ (dim,) → (N,)
+            mat = np.frombuffer(b"".join(blobs), dtype=np.float32).reshape(len(blobs), query_dim)
+            sims = mat @ query_vec  # BLAS-optimized dot product
+
+            for i, sim_val in enumerate(sims):
+                if sim_val >= effective_min_sim:
+                    mem_id, msg_id, content, source, timestamp, _ = valid_rows[i]
+                    sim = float(sim_val)
+                    candidates.append(
+                        (
+                            sim,
+                            {
+                                "id": mem_id,
+                                "_rid": ("mem", mem_id),
+                                "_cosine": sim,
+                                "msg_id": msg_id,
+                                "content": content,
+                                "source": source,
+                                "timestamp": timestamp,
+                            },
+                        )
+                    )
+
+    # 3. Search episode embeddings (batch matrix multiplication)
     ep_rows = await db.execute_fetchall(
         """SELECT id, summary, start_time, embedding, resolved
            FROM episodes
@@ -934,31 +1065,37 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
         (agent_id, scan_limit),
     )
 
-    for row in ep_rows:
-        ep_id, summary, start_time, blob, ep_resolved = row
-        try:
-            ep_vec = np.frombuffer(blob, dtype=np.float32)
-            if len(ep_vec) != query_dim:
-                continue
-            sim = float(np.dot(query_vec, ep_vec))
-            if sim >= VECTOR_MIN_SIMILARITY:
-                candidates.append(
-                    (
-                        sim,
-                        {
-                            "id": ep_id,
-                            "_rid": ("ep", ep_id),
-                            "_cosine": sim,
-                            "content": f"[Episode] {summary}",
-                            "source": {"System": "episode"},
-                            "timestamp": start_time or "",
-                            "_resolved": bool(ep_resolved),
-                        },
+    if ep_rows:
+        valid_ep_rows = []
+        ep_blobs = []
+        for row in ep_rows:
+            blob = row[3]
+            if blob and len(blob) == query_dim * 4:
+                valid_ep_rows.append(row)
+                ep_blobs.append(blob)
+
+        if valid_ep_rows:
+            ep_mat = np.frombuffer(b"".join(ep_blobs), dtype=np.float32).reshape(len(ep_blobs), query_dim)
+            ep_sims = ep_mat @ query_vec
+
+            for i, sim_val in enumerate(ep_sims):
+                if sim_val >= effective_min_sim:
+                    ep_id, summary, start_time, _, ep_resolved = valid_ep_rows[i]
+                    sim = float(sim_val)
+                    candidates.append(
+                        (
+                            sim,
+                            {
+                                "id": ep_id,
+                                "_rid": ("ep", ep_id),
+                                "_cosine": sim,
+                                "content": f"[Episode] {summary}",
+                                "source": {"System": "episode"},
+                                "timestamp": start_time or "",
+                                "_resolved": bool(ep_resolved),
+                            },
+                        )
                     )
-                )
-        except (ValueError, TypeError) as e:
-            logger.debug("Skipping episode %s: vector decode error: %s", ep_id, e)
-            continue
 
     # 4. Return top-K by similarity (heap selection: O(N log K) vs O(N log N) sort)
     top_k = heapq.nlargest(limit, candidates, key=lambda x: x[0])
@@ -1466,6 +1603,96 @@ async def do_delete_agent_data(agent_id: str) -> dict:
     return result
 
 
+async def do_calibrate_threshold(agent_id: str, sample_size: int = 0, z_factor: float = 0) -> dict:
+    """Auto-calibrate VECTOR_MIN_SIMILARITY based on embedding distribution.
+
+    Samples random embedding pairs from stored memories and computes their
+    cosine similarity distribution as a null distribution (mostly unrelated
+    pairs). The threshold is set at mean + z_factor * std, filtering out
+    pairs that are not significantly above the noise floor.
+
+    No ground-truth labels are used — calibration is purely statistical,
+    adapting to both the embedding model and corpus characteristics.
+
+    Strategy (z-score null distribution, lower tail):
+      threshold = mean - z * std
+      - z=1.0: filters bottom ~16% of noise (default, permissive)
+      - z=2.0: filters bottom ~2% (very permissive)
+      - z=0.5: filters bottom ~31% (moderate)
+    A floor value prevents the threshold from being uselessly low.
+
+    v2.3.7
+    """
+    import numpy as np
+
+    global VECTOR_MIN_SIMILARITY
+
+    db = await get_db()
+    sample_n = sample_size or CALIBRATE_SAMPLE_SIZE
+    z = z_factor or CALIBRATE_Z_FACTOR
+
+    # Sample random embeddings from this agent's memories
+    rows = await db.execute_fetchall(
+        "SELECT embedding FROM memories WHERE agent_id = ? AND embedding IS NOT NULL "
+        "ORDER BY RANDOM() LIMIT ?",
+        (agent_id, sample_n),
+    )
+
+    if len(rows) < 10:
+        return {"ok": False, "error": f"Need at least 10 embeddings, found {len(rows)}"}
+
+    # Decode embeddings
+    vecs = []
+    for (blob,) in rows:
+        vec = np.frombuffer(blob, dtype=np.float32).copy()
+        vecs.append(vec)
+    vecs = np.array(vecs)  # (N, dim)
+
+    # Compute pairwise cosine similarities (dot product on L2-normalized vecs)
+    sim_matrix = vecs @ vecs.T  # (N, N)
+
+    # Extract upper triangle (exclude diagonal = self-similarity = 1.0)
+    n = len(vecs)
+    triu_indices = np.triu_indices(n, k=1)
+    pairwise_sims = sim_matrix[triu_indices]
+
+    num_pairs = len(pairwise_sims)
+    old_threshold = VECTOR_MIN_SIMILARITY
+
+    # Compute statistics
+    sim_mean = float(np.mean(pairwise_sims))
+    sim_std = float(np.std(pairwise_sims))
+    sim_median = float(np.median(pairwise_sims))
+
+    # z-score based threshold: mean - z * std (lower tail), with floor
+    z_threshold = sim_mean - z * sim_std
+    new_threshold = max(z_threshold, CALIBRATE_FLOOR)
+
+    # Apply
+    VECTOR_MIN_SIMILARITY = round(new_threshold, 4)
+
+    result = {
+        "ok": True,
+        "agent_id": agent_id,
+        "sampled_embeddings": n,
+        "num_pairs": num_pairs,
+        "z_factor": z,
+        "distribution": {
+            "mean": round(sim_mean, 4),
+            "std": round(sim_std, 4),
+            "median": round(sim_median, 4),
+        },
+        "old_threshold": old_threshold,
+        "new_threshold": VECTOR_MIN_SIMILARITY,
+    }
+    logger.info(
+        "Calibrated VECTOR_MIN_SIMILARITY: %.4f → %.4f "
+        "(z=%.1f of %d pairs, mean=%.4f, std=%.4f)",
+        old_threshold, VECTOR_MIN_SIMILARITY, z, num_pairs, sim_mean, sim_std,
+    )
+    return result
+
+
 async def do_delete_episode(episode_id: int, agent_id: str = "") -> dict:
     """Delete a single episode by ID (FTS5 triggers handle index cleanup).
 
@@ -1904,6 +2131,25 @@ registry.auto_tool(
     do_delete_agent_data,
     [("agent_id", str)],
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),
+)
+
+registry.auto_tool(
+    "calibrate_threshold",
+    "Auto-calibrate vector search threshold using null distribution z-score. "
+    "Samples random memory pairs, computes cosine distribution, sets threshold "
+    "at mean + z*std. No labels used, purely statistical. Adapts to both "
+    "embedding model and corpus characteristics.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent ID whose memories to sample"},
+            "sample_size": {"type": "integer", "description": "Number of embeddings to sample (default: 200)"},
+            "z_factor": {"type": "number", "description": "Z-score multiplier (default: 1.0, higher = stricter)"},
+        },
+        "required": ["agent_id"],
+    },
+    do_calibrate_threshold,
+    [("agent_id", str), ("sample_size", int, 0), ("z_factor", float, 0)],
 )
 
 registry.auto_tool(
