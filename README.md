@@ -61,6 +61,8 @@ pip install -r requirements.lock
 
 > **Windows**: use `.venv/Scripts/python.exe` instead of `.venv/bin/python`, and `C:/Users/yourname/.claude/cpersona.db` for the DB path.
 
+> **Note**: Claude Desktop on Windows has [known issues with stdio MCP transport](https://github.com/anthropics/claude-code/issues/36319) (payload size limits, silent drops). If you experience problems, consider using cpersona's Streamable HTTP transport instead. See the [Zenn Book Ch.2](https://zenn.dev/clotodev/books/claude-memory-mcp-server/viewer/ch02-quickstart) for details.
+
 **Claude Code**:
 
 ```bash
