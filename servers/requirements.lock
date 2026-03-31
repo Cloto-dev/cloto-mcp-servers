@@ -10,7 +10,7 @@ av==16.1.0
 certifi==2026.2.25
 cffi==2.0.0
 click==8.3.1
-# Editable install with no version control (cloto-mcp-ks22==0.1.0)
+# Editable install with no version control (cloto-mcp-cpersona==2.4.0)
 colorama==0.4.6
 comtypes==1.4.15
 cryptography==46.0.5

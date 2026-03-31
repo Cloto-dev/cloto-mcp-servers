@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-03-15T00:00:00Z",
+  "updated_at": "2026-03-31T00:00:00Z",
   "servers": [
     {
       "id": "tool.terminal",
@@ -59,7 +59,7 @@
       "directory": "embedding",
       "dependencies": ["common"],
       "env_vars": [
-        { "key": "EMBEDDING_PROVIDER", "default": "onnx_miniml", "description": "Embedding provider" },
+        { "key": "EMBEDDING_PROVIDER", "default": "api_openai", "description": "Embedding provider" },
         { "key": "EMBEDDING_HTTP_PORT", "default": "8401", "description": "HTTP server port" }
       ],
       "optional_env_vars": [],
@@ -194,8 +194,8 @@
         { "key": "OLLAMA_BASE_URL", "default": "http://localhost:11434", "description": "Ollama API URL" }
       ],
       "optional_env_vars": [
-        { "key": "OLLAMA_MODEL", "default": "", "description": "Default model name" },
-        { "key": "OLLAMA_ENABLE_THINKING", "default": "", "description": "Enable thinking mode" }
+        { "key": "OLLAMA_MODEL", "default": "glm-4.7-flash", "description": "Default model name" },
+        { "key": "OLLAMA_ENABLE_THINKING", "default": "false", "description": "Enable thinking mode" }
       ],
       "tags": ["engine", "reasoning", "llm", "local"],
       "trust_level": "core",

@@ -1,5 +1,5 @@
 {
-  "pytest_test_count": 101,
-  "updated_at": "2026-03-28",
-  "updated_by": "embedding-v0.2.0-vector-index"
+  "pytest_test_count": 102,
+  "updated_at": "2026-03-31",
+  "updated_by": "doc-consistency-audit"
 }

@@ -113,6 +113,7 @@ Adjust paths to match your environment. For detailed setup instructions, see the
 | `vision.capture` | Vision | Image capture with Ollama + OCR |
 | `voice.stt` | Voice | Speech-to-text (Whisper) |
 | `output.avatar` | Output | VRM expression, idle behavior, and VOICEVOX TTS (Rust) |
+| `io.discord` | I/O | Bidirectional Discord communication via MGP events (Rust) |
 
 ## Setup (all servers)
 
