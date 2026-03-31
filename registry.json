@@ -211,7 +211,7 @@
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [
-        { "key": "CPERSONA_EMBEDDING_MODE", "default": "http", "description": "Embedding mode (http or local)" },
+        { "key": "CPERSONA_EMBEDDING_MODE", "default": "none", "description": "Embedding mode (none, http, or api)" },
         { "key": "CPERSONA_EMBEDDING_URL", "default": "http://127.0.0.1:8401/embed", "description": "Embedding endpoint" }
       ],
       "optional_env_vars": [

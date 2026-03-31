@@ -97,10 +97,10 @@ CALIBRATE_SAMPLE_SIZE = int(os.environ.get("CPERSONA_CALIBRATE_SAMPLE_SIZE", "20
 CALIBRATE_Z_FACTOR = float(os.environ.get("CPERSONA_CALIBRATE_Z_FACTOR", "1.0"))
 CALIBRATE_FLOOR = float(os.environ.get("CPERSONA_CALIBRATE_FLOOR", "0.05"))
 
-# Autocut (v2.5)
+# Autocut (v2.4)
 AUTOCUT_ENABLED = os.environ.get("CPERSONA_AUTOCUT_ENABLED", "false").lower() == "true"
 
-# Recall mode (v2.5)
+# Recall mode (v2.4)
 RECALL_MODE = os.environ.get("CPERSONA_RECALL_MODE", "cascade")  # cascade | rrf
 RRF_K = max(1, int(os.environ.get("CPERSONA_RRF_K", "60")))
 RRF_THRESHOLD_FACTOR = float(os.environ.get("CPERSONA_RRF_THRESHOLD_FACTOR", "0.5"))
@@ -785,7 +785,7 @@ async def _recall_cascade(
 async def _recall_rrf(
     db, agent_id: str, query: str, limit: int, deep: bool,
 ) -> list[dict]:
-    """v2.5 RRF recall: run vector and FTS5 independently, merge with
+    """v2.4 RRF recall: run vector and FTS5 independently, merge with
     Reciprocal Rank Fusion. Avoids cascade's positional bias.
 
     score(doc) = sum( 1 / (k + rank_i) ) for each retriever that found doc
@@ -871,7 +871,7 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
 
     Supports two modes (CPERSONA_RECALL_MODE):
     - "cascade" (default): Sequential stages, each filling remaining slots.
-    - "rrf" (v2.5): Run vector and FTS5 independently, merge with
+    - "rrf" (v2.4): Run vector and FTS5 independently, merge with
       Reciprocal Rank Fusion. Avoids the positional disadvantage of
       cascade ordering.
     """
@@ -891,7 +891,7 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
             r["_confidence_score"] = _compute_confidence(raw_cos, ts, resolved=is_resolved, deep=deep)["score"]
         results.sort(key=lambda r: r.get("_confidence_score", 0), reverse=True)
 
-    # v2.5: Autocut — detect score gap and remove noise results
+    # v2.4: Autocut — detect score gap and remove noise results
     if AUTOCUT_ENABLED:
         results = _autocut(results)
 
