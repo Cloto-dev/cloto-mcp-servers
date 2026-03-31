@@ -297,18 +297,19 @@ def build_chat_messages(
         if ref_raw:
             try:
                 ref_data = json.loads(ref_raw) if isinstance(ref_raw, str) else ref_raw
-                ref_author = ref_data.get("author_name", "Unknown")
-                ref_content = ref_data.get("content", "")
-                if ref_content:
-                    # Truncate long messages to avoid context bloat
-                    if len(ref_content) > 200:
-                        ref_content = ref_content[:200] + "..."
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": (f'[This is a reply to a message by {ref_author}: "{ref_content}"]'),
-                        }
-                    )
+                if isinstance(ref_data, dict):
+                    ref_author = ref_data.get("author_name", "Unknown")
+                    ref_content = ref_data.get("content", "")
+                    if ref_content:
+                        # Truncate long messages to avoid context bloat
+                        if len(ref_content) > 200:
+                            ref_content = ref_content[:200] + "..."
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (f'[This is a reply to a message by {ref_author}: "{ref_content}"]'),
+                            }
+                        )
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -587,12 +588,14 @@ def _error_response(error: Exception) -> list[TextContent]:
                 ),
             )
         ]
+    import logging
+    logging.getLogger(__name__).error("Unexpected error in LLM handler: %s", error, exc_info=True)
     return [
         TextContent(
             type="text",
             text=json.dumps(
                 {
-                    "error": "An unexpected error occurred",
+                    "error": f"An unexpected error occurred: {type(error).__name__}: {error}",
                     "error_code": "internal",
                 }
             ),
