@@ -297,20 +297,17 @@ async fn handle_callback_respond(
         .get("callback_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let response = params
-        .get("response")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
 
-    if callback_id.is_empty() || response.is_empty() {
+    if callback_id.is_empty() {
         return JsonRpcResponse::err(
             request.id.clone(),
             -32602,
-            "callback_id and response are required",
+            "callback_id is required",
         );
     }
 
-    // Look up the pending callback context
+    // Always remove the callback context first to stop the typing indicator,
+    // regardless of whether the response is empty or sending fails.
     let ctx = pending_callbacks
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -325,6 +322,20 @@ async fn handle_callback_respond(
     };
 
     // Typing indicator stops automatically when ctx (and its _typing guard) is dropped.
+
+    let response = params
+        .get("response")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Empty response: clean up typing but skip sending a message
+    if response.is_empty() {
+        tracing::info!(callback_id = %callback_id, "Empty response — typing stopped, no message sent");
+        return JsonRpcResponse::ok(
+            request.id.clone(),
+            json!({"status": "empty", "callback_id": callback_id, "channel_id": ctx.channel_id}),
+        );
+    }
 
     // Send the response to the original Discord channel
     let Some(http) = http else {
