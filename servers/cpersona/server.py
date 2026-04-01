@@ -460,7 +460,7 @@ _task_queue: MemoryTaskQueue | None = None
 # Database
 # ============================================================
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -477,6 +477,7 @@ CREATE TABLE IF NOT EXISTS memories (
     timestamp  TEXT NOT NULL,
     metadata   TEXT NOT NULL DEFAULT '{}',
     embedding  BLOB,
+    channel    TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -485,6 +486,9 @@ CREATE INDEX IF NOT EXISTS idx_memories_agent
 
 CREATE INDEX IF NOT EXISTS idx_memories_msg_id
     ON memories(agent_id, msg_id);
+
+CREATE INDEX IF NOT EXISTS idx_memories_agent_channel
+    ON memories(agent_id, channel, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS profiles (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -634,6 +638,15 @@ async def get_db() -> aiosqlite.Connection:
         except Exception as e:
             logger.warning("FTS trigram migration failed (non-fatal): %s", e)
 
+    # v2.4.1: Add channel column for context separation (chat vs discord)
+    if current < 6:
+        try:
+            await _db.execute("ALTER TABLE memories ADD COLUMN channel TEXT NOT NULL DEFAULT ''")
+            # Backfill: existing memories are from chat
+            await _db.execute("UPDATE memories SET channel = 'chat' WHERE channel = ''")
+        except Exception:
+            pass  # Column already exists (fresh DB with updated SCHEMA_SQL)
+
     if current < SCHEMA_VERSION:
         await _db.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
@@ -666,7 +679,7 @@ def generate_mem_key(agent_id: str, message: dict) -> str:
     return f"mem:{agent_id}:{ts}:{short_hash}"
 
 
-async def do_store(agent_id: str, message: dict) -> dict:
+async def do_store(agent_id: str, message: dict, channel: str = "") -> dict:
     """Store a message in agent memory."""
     db = await get_db()
 
@@ -699,9 +712,9 @@ async def do_store(agent_id: str, message: dict) -> dict:
             logger.warning("Embedding failed during store: %s", e)
 
     await db.execute(
-        """INSERT INTO memories (agent_id, msg_id, content, source, timestamp, metadata, embedding)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (agent_id, msg_id, content, source, timestamp, metadata, embedding_blob),
+        """INSERT INTO memories (agent_id, msg_id, content, source, timestamp, metadata, embedding, channel)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (agent_id, msg_id, content, source, timestamp, metadata, embedding_blob, channel),
     )
     await db.commit()
 
@@ -730,7 +743,7 @@ async def do_store(agent_id: str, message: dict) -> dict:
 
 
 async def _recall_cascade(
-    db, agent_id: str, query: str, limit: int, deep: bool,
+    db, agent_id: str, query: str, limit: int, deep: bool, channel: str = "",
 ) -> list[dict]:
     """Original cascading recall: stages fill remaining slots sequentially."""
     results: list[dict] = []
@@ -738,7 +751,7 @@ async def _recall_cascade(
 
     # Strategy 0: Vector search
     if _embedding_client and query.strip():
-        vector_results = await _search_vector(db, agent_id, query, limit)
+        vector_results = await _search_vector(db, agent_id, query, limit, channel=channel)
         for row in vector_results:
             rid = row.get("_rid", row["id"])
             if rid not in seen_ids:
@@ -772,7 +785,7 @@ async def _recall_cascade(
     # Strategy 3: Keyword match on memories
     remaining = max(0, limit - len(results))
     if remaining > 0:
-        memory_rows = await _search_memories_keyword(db, agent_id, query, remaining)
+        memory_rows = await _search_memories_keyword(db, agent_id, query, remaining, channel=channel)
         for row in memory_rows:
             rid = ("mem", row["id"])
             if rid not in seen_ids:
@@ -783,7 +796,7 @@ async def _recall_cascade(
 
 
 async def _recall_rrf(
-    db, agent_id: str, query: str, limit: int, deep: bool,
+    db, agent_id: str, query: str, limit: int, deep: bool, channel: str = "",
 ) -> list[dict]:
     """v2.4 RRF recall: run vector and FTS5 independently, merge with
     Reciprocal Rank Fusion. Avoids cascade's positional bias.
@@ -798,7 +811,7 @@ async def _recall_rrf(
     # Phase 3: RRF mode relaxes the similarity threshold for broader coverage
     rrf_min_sim = VECTOR_MIN_SIMILARITY * RRF_THRESHOLD_FACTOR
     if _embedding_client:
-        vector_results = await _search_vector(db, agent_id, query, limit, min_similarity=rrf_min_sim)
+        vector_results = await _search_vector(db, agent_id, query, limit, min_similarity=rrf_min_sim, channel=channel)
         for rank, row in enumerate(vector_results):
             rid = row.get("_rid", ("mem", row["id"]))
             if rid not in doc_map:
@@ -816,7 +829,7 @@ async def _recall_rrf(
 
     # --- Retriever 3: FTS5 keyword on memories (independent, up to limit) ---
     if FTS_ENABLED:
-        fts_mem_results = await _search_memories_keyword(db, agent_id, query, limit)
+        fts_mem_results = await _search_memories_keyword(db, agent_id, query, limit, channel=channel)
         for rank, row in enumerate(fts_mem_results):
             rid = ("mem", row["id"])
             if rid not in doc_map:
@@ -866,7 +879,7 @@ def _autocut(results: list[dict]) -> list[dict]:
     return results[:cut_idx]
 
 
-async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -> dict:
+async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, channel: str = "") -> dict:
     """Recall relevant memories using multi-strategy search.
 
     Supports two modes (CPERSONA_RECALL_MODE):
@@ -878,9 +891,9 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
     db = await get_db()
 
     if RECALL_MODE == "rrf" and query.strip():
-        results = await _recall_rrf(db, agent_id, query, limit, deep)
+        results = await _recall_rrf(db, agent_id, query, limit, deep, channel)
     else:
-        results = await _recall_cascade(db, agent_id, query, limit, deep)
+        results = await _recall_cascade(db, agent_id, query, limit, deep, channel)
 
     # v2.3.2+: Re-rank by confidence score before truncation (if enabled)
     if CONFIDENCE_ENABLED:
@@ -934,7 +947,7 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False) -
     return {"messages": messages}
 
 
-async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, limit: int, min_similarity: float | None = None) -> list[dict]:
+async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, limit: int, min_similarity: float | None = None, channel: str = "") -> list[dict]:
     """Search memories and episodes using vector cosine similarity."""
 
     # v2.3.5: Remote vector search via embedding server
@@ -959,10 +972,16 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
                 score = hit["score"]
                 if raw_id.startswith("mem:"):
                     mem_id = int(raw_id[4:])
-                    row = await db.execute_fetchall(
-                        "SELECT msg_id, content, source, timestamp FROM memories WHERE id = ?",
-                        (mem_id,),
-                    )
+                    if channel:
+                        row = await db.execute_fetchall(
+                            "SELECT msg_id, content, source, timestamp FROM memories WHERE id = ? AND channel = ?",
+                            (mem_id, channel),
+                        )
+                    else:
+                        row = await db.execute_fetchall(
+                            "SELECT msg_id, content, source, timestamp FROM memories WHERE id = ?",
+                            (mem_id,),
+                        )
                     if row:
                         results.append(
                             {
@@ -1012,14 +1031,24 @@ async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, li
     scan_limit = min(MAX_MEMORIES, max(limit * 10, 100))
 
     # 2. Search memory embeddings (batch matrix multiplication)
-    rows = await db.execute_fetchall(
-        """SELECT id, msg_id, content, source, timestamp, embedding
-           FROM memories
-           WHERE agent_id = ? AND embedding IS NOT NULL
-           ORDER BY created_at DESC
-           LIMIT ?""",
-        (agent_id, scan_limit),
-    )
+    if channel:
+        rows = await db.execute_fetchall(
+            """SELECT id, msg_id, content, source, timestamp, embedding
+               FROM memories
+               WHERE agent_id = ? AND channel = ? AND embedding IS NOT NULL
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (agent_id, channel, scan_limit),
+        )
+    else:
+        rows = await db.execute_fetchall(
+            """SELECT id, msg_id, content, source, timestamp, embedding
+               FROM memories
+               WHERE agent_id = ? AND embedding IS NOT NULL
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (agent_id, scan_limit),
+        )
 
     if rows:
         # Batch decode: collect valid embeddings into a matrix for vectorized cosine
@@ -1137,17 +1166,20 @@ async def _search_episodes_fts(db: aiosqlite.Connection, agent_id: str, query: s
     ]
 
 
-async def _search_memories_keyword(db: aiosqlite.Connection, agent_id: str, query: str, limit: int) -> list[dict]:
+async def _search_memories_keyword(db: aiosqlite.Connection, agent_id: str, query: str, limit: int, channel: str = "") -> list[dict]:
     """Search memories using FTS5 (preferred) or LIKE fallback."""
+    channel_clause = " AND channel = ?" if channel else ""
+    channel_params = (channel,) if channel else ()
+
     if not query.strip():
         # No query — return recent memories
         rows = await db.execute_fetchall(
-            """SELECT id, msg_id, content, source, timestamp
+            f"""SELECT id, msg_id, content, source, timestamp
                FROM memories
-               WHERE agent_id = ?
+               WHERE agent_id = ?{channel_clause}
                ORDER BY created_at DESC
                LIMIT ?""",
-            (agent_id, limit),
+            (agent_id, *channel_params, limit),
         )
         return [{"id": r[0], "msg_id": r[1], "content": r[2], "source": r[3], "timestamp": r[4]} for r in rows]
 
@@ -1158,14 +1190,14 @@ async def _search_memories_keyword(db: aiosqlite.Connection, agent_id: str, quer
         if words:
             fts_query = " ".join(f'"{w}"' for w in words)
             rows = await db.execute_fetchall(
-                """SELECT m.id, m.msg_id, m.content, m.source, m.timestamp
+                f"""SELECT m.id, m.msg_id, m.content, m.source, m.timestamp
                    FROM memories_fts f
                    JOIN memories m ON f.rowid = m.id
                    WHERE memories_fts MATCH ?
-                   AND m.agent_id = ?
+                   AND m.agent_id = ?{channel_clause.replace('channel', 'm.channel')}
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, agent_id, limit),
+                (fts_query, agent_id, *channel_params, limit),
             )
             if rows:
                 return [{"id": r[0], "msg_id": r[1], "content": r[2], "source": r[3], "timestamp": r[4]} for r in rows]
@@ -1174,13 +1206,13 @@ async def _search_memories_keyword(db: aiosqlite.Connection, agent_id: str, quer
     # LIKE fallback (FTS disabled or FTS returned no results)
     scan_limit = min(MAX_MEMORIES, max(limit * 5, 50))
     rows = await db.execute_fetchall(
-        """SELECT id, msg_id, content, source, timestamp
+        f"""SELECT id, msg_id, content, source, timestamp
            FROM memories
-           WHERE agent_id = ?
+           WHERE agent_id = ?{channel_clause}
            AND content LIKE ?
            ORDER BY created_at DESC
            LIMIT ?""",
-        (agent_id, f"%{query}%", scan_limit),
+        (agent_id, *channel_params, f"%{query}%", scan_limit),
     )
     return [{"id": r[0], "msg_id": r[1], "content": r[2], "source": r[3], "timestamp": r[4]} for r in rows[:limit]]
 
@@ -1971,11 +2003,15 @@ registry.auto_tool(
                 "type": "object",
                 "description": "ClotoMessage to store (id, content, source, timestamp, metadata)",
             },
+            "channel": {
+                "type": "string",
+                "description": "Memory channel for context separation (e.g. 'chat', 'discord'). Default: '' (shared).",
+            },
         },
         "required": ["agent_id", "message"],
     },
     do_store,
-    [("agent_id", str), ("message", dict)],
+    [("agent_id", str), ("message", dict), ("channel", str, "")],
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
 )
 
@@ -1993,11 +2029,15 @@ registry.auto_tool(
                 "description": "Deep recall — disable time and completion decay for exhaustive search",
                 "default": False,
             },
+            "channel": {
+                "type": "string",
+                "description": "Filter memories by channel (e.g. 'chat', 'discord'). Default: '' (all channels).",
+            },
         },
         "required": ["agent_id", "query"],
     },
     do_recall,
-    [("agent_id", str), ("query", str), ("limit", int, 10), ("deep", bool, False)],
+    [("agent_id", str), ("query", str), ("limit", int, 10), ("deep", bool, False), ("channel", str, "")],
     annotations=ToolAnnotations(readOnlyHint=True),
 )
 
