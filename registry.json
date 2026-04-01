@@ -207,7 +207,7 @@
       "name": "CPersona Memory",
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.4.0",
+      "version": "2.4.1",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [

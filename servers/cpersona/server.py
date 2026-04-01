@@ -743,7 +743,12 @@ async def do_store(agent_id: str, message: dict, channel: str = "") -> dict:
 
 
 async def _recall_cascade(
-    db, agent_id: str, query: str, limit: int, deep: bool, channel: str = "",
+    db,
+    agent_id: str,
+    query: str,
+    limit: int,
+    deep: bool,
+    channel: str = "",
 ) -> list[dict]:
     """Original cascading recall: stages fill remaining slots sequentially."""
     results: list[dict] = []
@@ -796,7 +801,12 @@ async def _recall_cascade(
 
 
 async def _recall_rrf(
-    db, agent_id: str, query: str, limit: int, deep: bool, channel: str = "",
+    db,
+    agent_id: str,
+    query: str,
+    limit: int,
+    deep: bool,
+    channel: str = "",
 ) -> list[dict]:
     """v2.4 RRF recall: run vector and FTS5 independently, merge with
     Reciprocal Rank Fusion. Avoids cascade's positional bias.
@@ -947,7 +957,14 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
     return {"messages": messages}
 
 
-async def _search_vector(db: aiosqlite.Connection, agent_id: str, query: str, limit: int, min_similarity: float | None = None, channel: str = "") -> list[dict]:
+async def _search_vector(
+    db: aiosqlite.Connection,
+    agent_id: str,
+    query: str,
+    limit: int,
+    min_similarity: float | None = None,
+    channel: str = "",
+) -> list[dict]:
     """Search memories and episodes using vector cosine similarity."""
 
     # v2.3.5: Remote vector search via embedding server
@@ -1166,7 +1183,9 @@ async def _search_episodes_fts(db: aiosqlite.Connection, agent_id: str, query: s
     ]
 
 
-async def _search_memories_keyword(db: aiosqlite.Connection, agent_id: str, query: str, limit: int, channel: str = "") -> list[dict]:
+async def _search_memories_keyword(
+    db: aiosqlite.Connection, agent_id: str, query: str, limit: int, channel: str = ""
+) -> list[dict]:
     """Search memories using FTS5 (preferred) or LIKE fallback."""
     channel_clause = " AND channel = ?" if channel else ""
     channel_params = (channel,) if channel else ()
@@ -1194,7 +1213,7 @@ async def _search_memories_keyword(db: aiosqlite.Connection, agent_id: str, quer
                    FROM memories_fts f
                    JOIN memories m ON f.rowid = m.id
                    WHERE memories_fts MATCH ?
-                   AND m.agent_id = ?{channel_clause.replace('channel', 'm.channel')}
+                   AND m.agent_id = ?{channel_clause.replace("channel", "m.channel")}
                    ORDER BY rank
                    LIMIT ?""",
                 (fts_query, agent_id, *channel_params, limit),
@@ -1665,8 +1684,7 @@ async def do_calibrate_threshold(agent_id: str, sample_size: int = 0, z_factor: 
 
     # Sample random embeddings from this agent's memories
     rows = await db.execute_fetchall(
-        "SELECT embedding FROM memories WHERE agent_id = ? AND embedding IS NOT NULL "
-        "ORDER BY RANDOM() LIMIT ?",
+        "SELECT embedding FROM memories WHERE agent_id = ? AND embedding IS NOT NULL ORDER BY RANDOM() LIMIT ?",
         (agent_id, sample_n),
     )
 
@@ -1718,9 +1736,13 @@ async def do_calibrate_threshold(agent_id: str, sample_size: int = 0, z_factor: 
         "new_threshold": VECTOR_MIN_SIMILARITY,
     }
     logger.info(
-        "Calibrated VECTOR_MIN_SIMILARITY: %.4f → %.4f "
-        "(z=%.1f of %d pairs, mean=%.4f, std=%.4f)",
-        old_threshold, VECTOR_MIN_SIMILARITY, z, num_pairs, sim_mean, sim_std,
+        "Calibrated VECTOR_MIN_SIMILARITY: %.4f → %.4f (z=%.1f of %d pairs, mean=%.4f, std=%.4f)",
+        old_threshold,
+        VECTOR_MIN_SIMILARITY,
+        z,
+        num_pairs,
+        sim_mean,
+        sim_std,
     )
     return result
 
@@ -1987,6 +2009,156 @@ async def do_import_memories(input_path: str, target_agent_id: str = "", dry_run
     }
     if errors:
         result["errors"] = errors
+    return result
+
+
+async def do_merge_memories(
+    source_agent_id: str,
+    target_agent_id: str,
+    strategy: str = "skip",
+    mode: str = "copy",
+    dry_run: bool = False,
+) -> dict:
+    """Merge memories, episodes, and profiles from one agent into another.
+
+    Atomic one-shot equivalent of export(source) → import(target).
+    No intermediate files; operates directly on the database.
+
+    - strategy="skip": skip records where target already has the same msg_id (default).
+    - mode="copy": preserve source data. mode="move": delete source after merge.
+    - Embeddings are NOT copied (re-computed on next recall, consistent with import).
+    - Profiles are copied only if target has no profile for the same user_id.
+    - FTS5 indexes are updated automatically via SQLite triggers.
+    """
+    if not source_agent_id:
+        return {"error": "source_agent_id is required"}
+    if not target_agent_id:
+        return {"error": "target_agent_id is required"}
+    if source_agent_id == target_agent_id:
+        return {"error": "source_agent_id and target_agent_id must differ"}
+    if strategy != "skip":
+        return {"error": f"Unsupported strategy '{strategy}'. Currently supported: 'skip'"}
+    if mode not in ("copy", "move"):
+        return {"error": f"Invalid mode '{mode}'. Supported: 'copy', 'move'"}
+
+    db = await get_db()
+
+    merged_memories = 0
+    skipped_memories = 0
+    merged_episodes = 0
+    skipped_episodes = 0
+    profile_copied = False
+    skipped_profile = False
+
+    # --- Memories ---
+    rows = await db.execute_fetchall(
+        "SELECT msg_id, content, source, timestamp, metadata, channel FROM memories WHERE agent_id = ?",
+        (source_agent_id,),
+    )
+    for msg_id, content, source, timestamp, metadata, channel in rows:
+        if not content:
+            continue
+        # Dedup by msg_id
+        if msg_id:
+            existing = await db.execute_fetchall(
+                "SELECT id FROM memories WHERE agent_id = ? AND msg_id = ? LIMIT 1",
+                (target_agent_id, msg_id),
+            )
+            if existing:
+                skipped_memories += 1
+                continue
+        if not dry_run:
+            await db.execute(
+                "INSERT INTO memories (agent_id, msg_id, content, source, timestamp, metadata, channel)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (target_agent_id, msg_id, content, source, timestamp, metadata, channel),
+            )
+        merged_memories += 1
+
+    # --- Episodes ---
+    rows = await db.execute_fetchall(
+        "SELECT summary, keywords, start_time, end_time, resolved FROM episodes WHERE agent_id = ?",
+        (source_agent_id,),
+    )
+    for summary, keywords, start_time, end_time, resolved in rows:
+        if not summary:
+            continue
+        # Dedup by summary text
+        existing = await db.execute_fetchall(
+            "SELECT id FROM episodes WHERE agent_id = ? AND summary = ? LIMIT 1",
+            (target_agent_id, summary),
+        )
+        if existing:
+            skipped_episodes += 1
+            continue
+        if not dry_run:
+            await db.execute(
+                "INSERT INTO episodes (agent_id, summary, keywords, start_time, end_time, resolved)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (target_agent_id, summary, keywords, start_time, end_time, resolved),
+            )
+        merged_episodes += 1
+
+    # --- Profiles (copy only if target has no profile for that user_id) ---
+    rows = await db.execute_fetchall(
+        "SELECT user_id, content FROM profiles WHERE agent_id = ?",
+        (source_agent_id,),
+    )
+    for user_id, content in rows:
+        if not content:
+            continue
+        existing = await db.execute_fetchall(
+            "SELECT id FROM profiles WHERE agent_id = ? AND user_id = ? LIMIT 1",
+            (target_agent_id, user_id),
+        )
+        if existing:
+            skipped_profile = True
+            continue
+        if not dry_run:
+            await db.execute(
+                "INSERT INTO profiles (agent_id, user_id, content, updated_at) VALUES (?, ?, ?, datetime('now'))",
+                (target_agent_id, user_id, content),
+            )
+        profile_copied = True
+
+    if not dry_run:
+        await db.commit()
+
+    # --- Move mode: delete source after successful merge ---
+    move_result = None
+    if mode == "move" and not dry_run:
+        move_result = await do_delete_agent_data(source_agent_id)
+
+    result: dict = {
+        "ok": True,
+        "dry_run": dry_run,
+        "source_agent_id": source_agent_id,
+        "target_agent_id": target_agent_id,
+        "strategy": strategy,
+        "mode": mode,
+        "merged_memories": merged_memories,
+        "skipped_memories": skipped_memories,
+        "merged_episodes": merged_episodes,
+        "skipped_episodes": skipped_episodes,
+        "profile_copied": profile_copied,
+        "skipped_profile": skipped_profile,
+    }
+    if move_result:
+        result["source_deleted"] = move_result
+
+    logger.info(
+        "Merge %s → %s (%s, %s): %d memories (+%d skipped), %d episodes (+%d skipped), profile=%s%s",
+        source_agent_id,
+        target_agent_id,
+        strategy,
+        mode,
+        merged_memories,
+        skipped_memories,
+        merged_episodes,
+        skipped_episodes,
+        "copied" if profile_copied else ("skipped" if skipped_profile else "none"),
+        " [DRY RUN]" if dry_run else "",
+    )
     return result
 
 
@@ -2288,6 +2460,51 @@ registry.auto_tool(
     },
     do_import_memories,
     [("input_path", str), ("target_agent_id", str, ""), ("dry_run", bool, False)],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+)
+
+registry.auto_tool(
+    "merge_memories",
+    "Merge memories, episodes, and profiles from one agent into another. "
+    "Atomic one-shot equivalent of export→import without intermediate files. "
+    "Strategy 'skip' deduplicates by msg_id (memories) and summary (episodes).",
+    {
+        "type": "object",
+        "properties": {
+            "source_agent_id": {
+                "type": "string",
+                "description": "Agent ID to merge FROM",
+            },
+            "target_agent_id": {
+                "type": "string",
+                "description": "Agent ID to merge INTO",
+            },
+            "strategy": {
+                "type": "string",
+                "description": "Merge strategy: 'skip' (default) — skip duplicates, keep target's version",
+                "default": "skip",
+            },
+            "mode": {
+                "type": "string",
+                "description": "Merge mode: 'copy' (preserve source) or 'move' (delete source after merge)",
+                "default": "copy",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "Preview merge without writing to DB",
+                "default": False,
+            },
+        },
+        "required": ["source_agent_id", "target_agent_id"],
+    },
+    do_merge_memories,
+    [
+        ("source_agent_id", str),
+        ("target_agent_id", str),
+        ("strategy", str, "skip"),
+        ("mode", str, "copy"),
+        ("dry_run", bool, False),
+    ],
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
 )
 
