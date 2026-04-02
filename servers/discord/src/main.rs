@@ -424,15 +424,24 @@ async fn handle_callback_respond(
         );
     };
 
+    // Extract values and immediately drop ctx to stop typing indicator.
+    // Serenity's Typing guard runs a background task that POSTs typing every ~9s;
+    // dropping it aborts the task. Holding ctx until function end causes typing to
+    // persist through the entire send_message + reaction flow.
+    let ctx_channel_id = ctx.channel_id.clone();
+    let ctx_message_id = ctx.message_id.clone();
+    let ctx_is_reply = ctx.is_reply;
+    drop(ctx); // ← _typing dropped here → typing stops immediately
+
     let response = params
         .get("response")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let channel_id: u64 = ctx.channel_id.parse().unwrap_or(0);
-    let message_id: u64 = ctx.message_id.parse().unwrap_or(0);
+    let channel_id: u64 = ctx_channel_id.parse().unwrap_or(0);
+    let message_id: u64 = ctx_message_id.parse().unwrap_or(0);
 
-    // Empty response: clean up typing but skip sending
+    // Empty response: typing already stopped above
     if response.is_empty() {
         tracing::info!(callback_id = %callback_id, "Empty response — typing stopped");
         return JsonRpcResponse::ok(
@@ -448,14 +457,14 @@ async fn handle_callback_respond(
     // Reply format only when the user replied to a bot message;
     // mention-triggered messages get a normal (non-reply) response.
     let mut send_args = json!({
-        "channel_id": ctx.channel_id,
+        "channel_id": ctx_channel_id,
         "content": response,
     });
-    if ctx.is_reply {
+    if ctx_is_reply {
         send_args
             .as_object_mut()
             .unwrap()
-            .insert("reply_to".into(), json!(ctx.message_id));
+            .insert("reply_to".into(), json!(ctx_message_id));
     }
 
     // Dummy bot_context (not needed for send_message)
@@ -490,12 +499,12 @@ async fn handle_callback_respond(
 
             tracing::info!(
                 callback_id = %callback_id,
-                channel_id = %ctx.channel_id,
+                channel_id = %ctx_channel_id,
                 "Callback response sent to Discord"
             );
             JsonRpcResponse::ok(
                 request.id.clone(),
-                json!({"status": "sent", "callback_id": callback_id, "channel_id": ctx.channel_id}),
+                json!({"status": "sent", "callback_id": callback_id, "channel_id": ctx_channel_id}),
             )
         }
         Err(e) => {
