@@ -80,6 +80,8 @@ COSINE_FLOOR = float(os.environ.get("CPERSONA_COSINE_FLOOR", "0.20"))
 COSINE_CEIL = float(os.environ.get("CPERSONA_COSINE_CEIL", "0.75"))
 DECAY_RATE = float(os.environ.get("CPERSONA_DECAY_RATE", "0.005"))
 DECAY_FLOOR = float(os.environ.get("CPERSONA_DECAY_FLOOR", "0.3"))
+DECAY_CEIL = float(os.environ.get("CPERSONA_DECAY_CEIL", "0.5"))
+RECALL_BOOST = float(os.environ.get("CPERSONA_RECALL_BOOST", "0.02"))
 MIN_TIME_RANGE_HOURS = float(os.environ.get("CPERSONA_MIN_TIME_RANGE_HOURS", "24"))
 REFERENCE_HOURS = float(os.environ.get("CPERSONA_REFERENCE_HOURS", "168"))  # 1 week
 RESOLVED_DECAY_FACTOR = float(os.environ.get("CPERSONA_RESOLVED_DECAY_FACTOR", "0.3"))
@@ -410,7 +412,7 @@ _task_queue: MemoryTaskQueue | None = None
 # Database
 # ============================================================
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -428,6 +430,7 @@ CREATE TABLE IF NOT EXISTS memories (
     metadata   TEXT NOT NULL DEFAULT '{}',
     embedding  BLOB,
     channel    TEXT NOT NULL DEFAULT '',
+    recall_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -597,6 +600,13 @@ async def get_db() -> aiosqlite.Connection:
             "CREATE INDEX IF NOT EXISTS idx_memories_agent_channel "
             "ON memories(agent_id, channel, created_at DESC)"
         )
+
+    # v2.4.4: Add recall_count column for recall boost
+    if current < 7:
+        try:
+            await _db.execute("ALTER TABLE memories ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # Column already exists
 
     if current < SCHEMA_VERSION:
         await _db.execute(
@@ -896,8 +906,9 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
     else:
         results = await _recall_cascade(db, agent_id, query, limit, deep, channel)
 
-    # v2.4.4: Compute time range for dynamic decay
+    # v2.4.4: Compute time range for dynamic decay + fetch recall counts
     time_range_hours = 0.0
+    recall_counts: dict[int, int] = {}
     if CONFIDENCE_ENABLED and results:
         range_row = await db.execute_fetchall(
             "SELECT MIN(timestamp), MAX(timestamp) FROM memories WHERE agent_id = ?",
@@ -909,14 +920,26 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
             if oldest and newest:
                 time_range_hours = max(0.0, (newest - oldest).total_seconds() / 3600)
 
+        # Fetch recall_count for memory results (skip episodes/profiles)
+        mem_ids = [r["id"] for r in results if isinstance(r.get("id"), int) and r["id"] > 0]
+        if mem_ids:
+            placeholders = ",".join("?" * len(mem_ids))
+            rc_rows = await db.execute_fetchall(
+                f"SELECT id, recall_count FROM memories WHERE id IN ({placeholders})",
+                mem_ids,
+            )
+            recall_counts = {r[0]: r[1] for r in rc_rows}
+
     # v2.3.2+: Re-rank by confidence score before truncation (if enabled)
     if CONFIDENCE_ENABLED:
         for r in results:
             ts = r.get("timestamp", "")
             raw_cos = r.get("_cosine")
             is_resolved = r.get("_resolved", False)
+            rc = recall_counts.get(r.get("id", -1), 0)
             r["_confidence_score"] = _compute_confidence(
-                raw_cos, ts, resolved=is_resolved, deep=deep, time_range_hours=time_range_hours,
+                raw_cos, ts, resolved=is_resolved, deep=deep,
+                time_range_hours=time_range_hours, recall_count=rc,
             )["score"]
         results.sort(key=lambda r: r.get("_confidence_score", 0), reverse=True)
 
@@ -947,8 +970,10 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
             raw_cosine = r.get("_cosine")
             ts = r.get("timestamp", "")
             is_resolved = r.get("_resolved", False)
+            rc = recall_counts.get(r.get("id", -1), 0)
             msg["confidence"] = _compute_confidence(
-                raw_cosine, ts, resolved=is_resolved, deep=deep, time_range_hours=time_range_hours,
+                raw_cosine, ts, resolved=is_resolved, deep=deep,
+                time_range_hours=time_range_hours, recall_count=rc,
             )
         # Remove internal tracking keys
         r.pop("_rid", None)
@@ -957,6 +982,17 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
         r.pop("_rrf_score", None)
         r.pop("_resolved", None)
         messages.append(msg)
+
+    # v2.4.4: Increment recall_count for returned memories (skip deep recall)
+    if not deep and recall_counts:
+        returned_ids = [r.get("id", -1) for r in results if isinstance(r.get("id"), int) and r["id"] > 0]
+        if returned_ids:
+            placeholders = ",".join("?" * len(returned_ids))
+            await db.execute(
+                f"UPDATE memories SET recall_count = recall_count + 1 WHERE id IN ({placeholders})",
+                returned_ids,
+            )
+            await db.commit()
 
     return {"messages": messages}
 
@@ -1351,6 +1387,7 @@ def _compute_confidence(
     resolved: bool = False,
     deep: bool = False,
     time_range_hours: float = 0.0,
+    recall_count: int = 0,
 ) -> dict:
     """Compute confidence metadata for a recall result (v2.3.2+).
 
@@ -1359,8 +1396,8 @@ def _compute_confidence(
     When deep=True, time_decay and completion_factor are both 1.0.
 
     v2.4.4: Dynamic time decay — effective_rate adapts to the agent's
-    memory time range. Newer agents decay faster, established agents
-    have a gentler curve.
+    memory time range. Recall boost — frequently recalled memories get
+    a higher decay floor (harder to forget).
     """
     now = datetime.now(timezone.utc)
     age_hours = 0.0
@@ -1369,6 +1406,9 @@ def _compute_confidence(
     if parsed:
         age_hours = max(0.0, (now - parsed).total_seconds() / 3600)
 
+    # Recall boost: raise floor for frequently recalled memories
+    effective_floor = min(DECAY_CEIL, DECAY_FLOOR + math.log(1 + recall_count) * RECALL_BOOST)
+
     # v2.3.3: deep recall disables decay
     if deep:
         time_decay = 1.0
@@ -1376,10 +1416,10 @@ def _compute_confidence(
         # v2.4.4: Dynamic rate — scale DECAY_RATE by time_range
         effective_range = max(MIN_TIME_RANGE_HOURS, time_range_hours)
         effective_rate = DECAY_RATE / max(1.0, effective_range / REFERENCE_HOURS)
-        time_decay = max(DECAY_FLOOR, 1.0 / (1.0 + age_hours * effective_rate))
+        time_decay = max(effective_floor, 1.0 / (1.0 + age_hours * effective_rate))
     else:
         # Fallback: original fixed rate (backward compatible)
-        time_decay = 1.0 / (1.0 + age_hours * DECAY_RATE)
+        time_decay = max(effective_floor, 1.0 / (1.0 + age_hours * DECAY_RATE))
     completion_factor = 1.0 if (deep or not resolved) else RESOLVED_DECAY_FACTOR
 
     confidence: dict = {"age_hours": round(age_hours, 1)}
