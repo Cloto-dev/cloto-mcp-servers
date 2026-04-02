@@ -207,8 +207,8 @@
       "name": "CPersona Memory",
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.4.2",
-      "changelog": "channel-based memory isolation (chat/discord), memory annotation separation, LLM dependency removal, get_profile tool",
+      "version": "2.4.3",
+      "changelog": "Store validation (sanitize mentions/annotations, content dedup, length limit), check_health diagnostic tool",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [

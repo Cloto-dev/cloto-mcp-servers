@@ -54,6 +54,7 @@ def _clamp_limit(limit: int, cap: int) -> int:
 
 DB_PATH = os.environ.get("CPERSONA_DB_PATH", "data/cpersona.db")
 MAX_MEMORIES = int(os.environ.get("CPERSONA_MAX_MEMORIES", "500"))
+MAX_CONTENT_LENGTH = int(os.environ.get("CPERSONA_MAX_CONTENT_LENGTH", "2000"))
 FTS_ENABLED = os.environ.get("CPERSONA_FTS_ENABLED", "true").lower() == "true"
 
 # Embedding configuration
@@ -613,6 +614,28 @@ async def close_db():
 
 
 # ============================================================
+# Content Sanitization (v2.4.3)
+# ============================================================
+
+_MENTION_PATTERN = re.compile(r"<@!?\d+>")
+_MEMORY_ANNOTATION_PATTERN = re.compile(r"\[Memory from [^\]]+\]\s*")
+
+
+def _sanitize_content(content: str) -> str:
+    """Sanitize content before storing in memory.
+
+    Removes Discord bot mentions, [Memory from ...] annotations,
+    trims whitespace, and enforces length limit.
+    """
+    content = _MENTION_PATTERN.sub("", content)
+    content = _MEMORY_ANNOTATION_PATTERN.sub("", content)
+    content = content.strip()
+    if len(content) > MAX_CONTENT_LENGTH:
+        content = content[:MAX_CONTENT_LENGTH]
+    return content
+
+
+# ============================================================
 # Memory Operations
 # ============================================================
 
@@ -631,13 +654,20 @@ async def do_store(agent_id: str, message: dict, channel: str = "") -> dict:
     db = await get_db()
 
     msg_id = message.get("id", "")
-    content = message.get("content", "")
+    raw_content = message.get("content", "")
     source = json.dumps(message.get("source", {}))
     timestamp = message.get("timestamp", datetime.now(timezone.utc).isoformat())
     metadata = json.dumps(message.get("metadata", {}))
 
-    if not content:
+    if not raw_content:
         return {"ok": True, "skipped": True, "reason": "empty content"}
+
+    # Sanitize content (v2.4.3)
+    content = _sanitize_content(raw_content)
+    truncated = len(raw_content) > MAX_CONTENT_LENGTH
+
+    if not content:
+        return {"ok": True, "skipped": True, "reason": "empty after sanitization"}
 
     # Deduplicate by msg_id if provided
     if msg_id:
@@ -647,6 +677,14 @@ async def do_store(agent_id: str, message: dict, channel: str = "") -> dict:
         )
         if row:
             return {"ok": True, "skipped": True, "reason": "duplicate msg_id"}
+
+    # Deduplicate by exact content match (v2.4.3)
+    existing = await db.execute_fetchall(
+        "SELECT id FROM memories WHERE agent_id = ? AND channel = ? AND content = ? LIMIT 1",
+        (agent_id, channel, content),
+    )
+    if existing:
+        return {"ok": True, "skipped": True, "reason": "duplicate content"}
 
     # Compute embedding before insert (so we can include it in the INSERT)
     embedding_blob = None
@@ -686,7 +724,10 @@ async def do_store(agent_id: str, message: dict, channel: str = "") -> dict:
         except Exception as e:
             logger.debug("Remote index failed (non-fatal): %s", e)
 
-    return {"ok": True}
+    result = {"ok": True}
+    if truncated:
+        result["truncated"] = True
+    return result
 
 
 async def _recall_cascade(
@@ -2349,6 +2390,148 @@ registry.auto_tool(
         ("dry_run", bool, False),
     ],
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+)
+
+
+async def do_check_health(agent_id: str = "", fix: bool = False) -> dict:
+    """Check and optionally fix memory database health issues."""
+    db = await get_db()
+    issues = []
+
+    agent_clause = "AND agent_id = ?" if agent_id else ""
+    agent_params = (agent_id,) if agent_id else ()
+
+    # 1. [Memory from ...] annotations in content
+    rows = await db.execute_fetchall(
+        f"SELECT id, content FROM memories WHERE content LIKE '%[Memory from%' {agent_clause}",
+        agent_params,
+    )
+    if rows:
+        issues.append({"type": "memory_annotation", "count": len(rows)})
+        if fix:
+            for row_id, content in rows:
+                cleaned = _MEMORY_ANNOTATION_PATTERN.sub("", content).strip()
+                await db.execute("UPDATE memories SET content = ? WHERE id = ?", (cleaned, row_id))
+
+    # 2. Discord mentions in content
+    rows = await db.execute_fetchall(
+        f"SELECT id, content FROM memories WHERE content LIKE '%<@%' {agent_clause}",
+        agent_params,
+    )
+    if rows:
+        issues.append({"type": "discord_mention", "count": len(rows)})
+        if fix:
+            for row_id, content in rows:
+                cleaned = _MENTION_PATTERN.sub("", content).strip()
+                await db.execute("UPDATE memories SET content = ? WHERE id = ?", (cleaned, row_id))
+
+    # 3. Duplicate content
+    dup_rows = await db.execute_fetchall(
+        f"""SELECT content, COUNT(*) as cnt FROM memories
+            WHERE 1=1 {agent_clause}
+            GROUP BY agent_id, content HAVING cnt > 1""",
+        agent_params,
+    )
+    if dup_rows:
+        total_dupes = sum(r[1] - 1 for r in dup_rows)
+        issues.append({"type": "duplicate_content", "groups": len(dup_rows), "total_extra": total_dupes})
+        if fix:
+            await db.execute(
+                "DELETE FROM memories WHERE id NOT IN (SELECT MIN(id) FROM memories GROUP BY agent_id, content)"
+            )
+
+    # 4. Oversized content
+    rows = await db.execute_fetchall(
+        f"SELECT id, length(content) as len FROM memories WHERE length(content) > ? {agent_clause}",
+        (MAX_CONTENT_LENGTH, *agent_params),
+    )
+    if rows:
+        issues.append({"type": "oversized_content", "count": len(rows), "max_len": max(r[1] for r in rows)})
+        if fix:
+            for row_id, _ in rows:
+                await db.execute(
+                    "UPDATE memories SET content = SUBSTR(content, 1, ?) WHERE id = ?",
+                    (MAX_CONTENT_LENGTH, row_id),
+                )
+
+    # 5. Empty channel
+    count = (await db.execute_fetchall(
+        f"SELECT COUNT(*) FROM memories WHERE channel = '' {agent_clause}",
+        agent_params,
+    ))[0][0]
+    if count > 0:
+        issues.append({"type": "empty_channel", "count": count})
+        if fix:
+            await db.execute(
+                f"UPDATE memories SET channel = 'chat' WHERE channel = '' {agent_clause}",
+                agent_params,
+            )
+
+    # 6. Embedding dimension mismatch
+    if _embedding_client:
+        try:
+            test_emb = await _embedding_client.embed(["test"])
+            if test_emb and test_emb[0]:
+                expected_bytes = len(test_emb[0]) * 4
+                mismatched = (await db.execute_fetchall(
+                    f"""SELECT COUNT(*) FROM memories
+                        WHERE embedding IS NOT NULL AND length(embedding) != ?
+                        {agent_clause}""",
+                    (expected_bytes, *agent_params),
+                ))[0][0]
+                if mismatched > 0:
+                    issues.append({
+                        "type": "embedding_dimension_mismatch",
+                        "count": mismatched,
+                        "expected_dim": len(test_emb[0]),
+                    })
+        except Exception:
+            pass
+
+    # 7. Null embeddings
+    null_count = (await db.execute_fetchall(
+        f"SELECT COUNT(*) FROM memories WHERE embedding IS NULL {agent_clause}",
+        agent_params,
+    ))[0][0]
+    if null_count > 0:
+        issues.append({"type": "null_embedding", "count": null_count})
+
+    if fix:
+        await db.commit()
+
+    total = (await db.execute_fetchall(
+        f"SELECT COUNT(*) FROM memories WHERE 1=1 {agent_clause}", agent_params
+    ))[0][0]
+
+    return {
+        "total_memories": total,
+        "issues": issues,
+        "healthy": len(issues) == 0,
+        "fixed": fix,
+    }
+
+
+registry.auto_tool(
+    "check_health",
+    "Check memory database health. Detects contamination (annotations, mentions), "
+    "duplicates, oversized content, embedding mismatches. Set fix=true to auto-repair.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {
+                "type": "string",
+                "description": "Agent ID to check (empty = all agents)",
+            },
+            "fix": {
+                "type": "boolean",
+                "description": "Auto-fix detected issues",
+                "default": False,
+            },
+        },
+    },
+    do_check_health,
+    [("agent_id", str, ""), ("fix", bool, False)],
+    annotations=ToolAnnotations(readOnlyHint=False),
 )
 
 
