@@ -46,7 +46,11 @@ EMBEDDING_INDEX_DB_PATH = os.environ.get("EMBEDDING_INDEX_DB_PATH", "data/embedd
 # ONNX-specific — resolve relative paths against CLOTO_PROJECT_DIR when running
 # inside a sandbox (isolation changes the working directory).
 _project_dir = os.environ.get("CLOTO_PROJECT_DIR", "")
-_default_model_dir = "data/models/all-MiniLM-L6-v2"
+_MODEL_DIRS = {
+    "onnx_miniml": "data/models/all-MiniLM-L6-v2",
+    "onnx_jina_v5_nano": "data/models/jina-embeddings-v5-text-nano",
+}
+_default_model_dir = _MODEL_DIRS.get(EMBEDDING_PROVIDER, "data/models/all-MiniLM-L6-v2")
 ONNX_MODEL_DIR = os.environ.get("ONNX_MODEL_DIR", "")
 if not ONNX_MODEL_DIR:
     if _project_dir and not os.path.isabs(_default_model_dir):
@@ -254,6 +258,122 @@ class OnnxMiniLMProvider(EmbeddingProvider):
 
 
 # ============================================================
+# onnx_jina_v5_nano Provider
+# ============================================================
+
+
+class OnnxJinaV5NanoProvider(EmbeddingProvider):
+    """Local jina-embeddings-v5-text-nano ONNX embedding provider.
+
+    Uses Last-Token pooling (different from MiniLM's mean pooling).
+    768-dim output, 8K context, retrieval-optimized merged LoRA.
+    """
+
+    def __init__(self, model_dir: str):
+        self._model_dir = model_dir
+        self._session = None
+        self._tokenizer = None
+        self._lock = asyncio.Lock()
+
+    async def initialize(self) -> None:
+        try:
+            import onnxruntime as ort
+            from tokenizers import Tokenizer
+        except ImportError:
+            raise ImportError(
+                "onnx_jina_v5_nano provider requires: pip install onnxruntime tokenizers\n"
+                "Or: pip install cloto-mcp-embedding[onnx]"
+            )
+
+        model_path = os.path.join(self._model_dir, "model.onnx")
+        tokenizer_path = os.path.join(self._model_dir, "tokenizer.json")
+
+        # Auto-download model if missing
+        if not os.path.exists(model_path) or not os.path.exists(tokenizer_path):
+            logger.info("Jina-v5-nano ONNX model not found, downloading...")
+            try:
+                from download_model import download_jina_v5_nano
+
+                if not download_jina_v5_nano(self._model_dir):
+                    raise FileNotFoundError(f"Failed to download model to {self._model_dir}")
+            except ImportError:
+                raise FileNotFoundError(
+                    f"ONNX model not found at {model_path}. "
+                    f"Download with: python embedding/download_model.py --model jina-v5-nano"
+                )
+
+        # Try DirectML (AMD GPU), fall back to CPU
+        providers = []
+        try:
+            available = ort.get_available_providers()
+            if "DmlExecutionProvider" in available:
+                providers.append("DmlExecutionProvider")
+                logger.info("Using DirectML (AMD GPU) for ONNX inference")
+        except Exception:
+            pass
+        providers.append("CPUExecutionProvider")
+
+        self._session = ort.InferenceSession(model_path, providers=providers)
+        self._tokenizer = Tokenizer.from_file(tokenizer_path)
+        # jina-v5-nano supports 8K context
+        self._tokenizer.enable_padding(pad_id=0, pad_token="<pad>", length=512)
+        self._tokenizer.enable_truncation(max_length=512)
+
+        logger.info(
+            "ONNX Jina-v5-nano provider initialized (dir=%s, providers=%s)",
+            self._model_dir,
+            providers,
+        )
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not self._session or not self._tokenizer:
+            raise RuntimeError("Provider not initialized")
+
+        async with self._lock:
+            return await asyncio.get_event_loop().run_in_executor(None, self._embed_sync, texts)
+
+    def _embed_sync(self, texts: list[str]) -> list[list[float]]:
+        """Synchronous embedding with Last-Token pooling."""
+        encodings = self._tokenizer.encode_batch(texts)
+
+        input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
+        attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
+
+        # jina-v5-nano may not use token_type_ids — check model inputs
+        input_names = [inp.name for inp in self._session.get_inputs()]
+        inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
+        if "token_type_ids" in input_names:
+            inputs["token_type_ids"] = np.zeros_like(input_ids)
+
+        outputs = self._session.run(None, inputs)
+        token_embeddings = outputs[0]  # (batch, seq_len, hidden_dim=768)
+
+        # Last-Token pooling: extract the last non-padding token's embedding
+        batch_size = token_embeddings.shape[0]
+        hidden_dim = token_embeddings.shape[2]
+        last_token_embs = np.zeros((batch_size, hidden_dim), dtype=np.float32)
+
+        for i in range(batch_size):
+            seq_len = int(np.sum(attention_mask[i]))
+            last_idx = max(seq_len - 1, 0)
+            last_token_embs[i] = token_embeddings[i, last_idx]
+
+        # L2 normalization
+        norms = np.linalg.norm(last_token_embs, axis=1, keepdims=True)
+        norms = np.clip(norms, a_min=1e-9, a_max=None)
+        normalized = last_token_embs / norms
+
+        return normalized.tolist()
+
+    def dimensions(self) -> int:
+        return 768
+
+    async def shutdown(self) -> None:
+        self._session = None
+        self._tokenizer = None
+
+
+# ============================================================
 # Vector Index (v0.2.0)
 # ============================================================
 
@@ -425,8 +545,13 @@ def create_provider() -> EmbeddingProvider:
         )
     elif EMBEDDING_PROVIDER == "onnx_miniml":
         return OnnxMiniLMProvider(model_dir=ONNX_MODEL_DIR)
+    elif EMBEDDING_PROVIDER == "onnx_jina_v5_nano":
+        return OnnxJinaV5NanoProvider(model_dir=ONNX_MODEL_DIR)
     else:
-        raise ValueError(f"Unknown embedding provider: {EMBEDDING_PROVIDER}. Supported: api_openai, onnx_miniml")
+        raise ValueError(
+            f"Unknown embedding provider: {EMBEDDING_PROVIDER}. "
+            f"Supported: api_openai, onnx_miniml, onnx_jina_v5_nano"
+        )
 
 
 # ============================================================
