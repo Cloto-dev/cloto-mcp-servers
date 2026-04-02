@@ -487,9 +487,6 @@ CREATE INDEX IF NOT EXISTS idx_memories_agent
 CREATE INDEX IF NOT EXISTS idx_memories_msg_id
     ON memories(agent_id, msg_id);
 
-CREATE INDEX IF NOT EXISTS idx_memories_agent_channel
-    ON memories(agent_id, channel, created_at DESC);
-
 CREATE TABLE IF NOT EXISTS profiles (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id   TEXT NOT NULL,
@@ -646,6 +643,10 @@ async def get_db() -> aiosqlite.Connection:
             await _db.execute("UPDATE memories SET channel = 'chat' WHERE channel = ''")
         except Exception:
             pass  # Column already exists (fresh DB with updated SCHEMA_SQL)
+        await _db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_agent_channel "
+            "ON memories(agent_id, channel, created_at DESC)"
+        )
 
     if current < SCHEMA_VERSION:
         await _db.execute(
