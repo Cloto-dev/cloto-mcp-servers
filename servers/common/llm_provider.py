@@ -217,6 +217,35 @@ def build_system_prompt(agent: dict, tools: list[dict] | None = None) -> str:
     return "\n".join(lines)
 
 
+def _context_msg_to_role_content(msg: dict) -> tuple[str, str]:
+    """Map a context message to (role, content) for the OpenAI messages array."""
+    source = msg.get("source", {})
+    src_type = source.get("type", "") if isinstance(source, dict) else ""
+    content = msg.get("content", "")
+    if src_type in ("User",) or "User" in source or "user" in source:
+        role = "user"
+        ctx_name = source.get("name", "") if isinstance(source, dict) else ""
+        if ctx_name and ctx_name not in ("User", ""):
+            content = f"[{ctx_name}]: {content}"
+    elif src_type in ("Agent",) or "Agent" in source or "agent" in source:
+        role = "assistant"
+    else:
+        role = "system"
+    return role, content
+
+
+def _parse_context_timestamp(ts: str) -> str | None:
+    """Parse an ISO-8601 timestamp and format for LLM context display."""
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        # Convert to local timezone for user-friendly display
+        local_dt = dt.astimezone()
+        return local_dt.strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return None
+
+
 def build_chat_messages(
     agent: dict,
     message: dict,
@@ -230,43 +259,60 @@ def build_chat_messages(
     """
     messages = [{"role": "system", "content": build_system_prompt(agent, tools)}]
 
-    if context:
+    # Split context into memory (CPersona recall) and conversation (channel history)
+    memory_msgs = [m for m in context if m.get("context_type") != "conversation"]
+    conversation_msgs = [m for m in context if m.get("context_type") == "conversation"]
+
+    if memory_msgs:
         messages.append(
             {
                 "role": "system",
                 "content": (
                     "[The following are recalled memories from past conversations. "
-                    "They are NOT recent messages. Time references in them may be outdated. "
-                    "Do NOT include memory annotations such as [Memory from ...] in your responses.]"
+                    "They are NOT recent messages. Time references in them may be outdated.]"
                 ),
             }
         )
-
-    for msg in context:
-        source = msg.get("source", {})
-        # Handle both serde internally-tagged {"type": "User", ...}
-        # and legacy externally-tagged {"User": {...}} formats
-        src_type = source.get("type", "") if isinstance(source, dict) else ""
-        content = msg.get("content", "")
-        if src_type in ("User",) or "User" in source or "user" in source:
-            role = "user"
-            # Include user name in context messages for multi-user awareness
-            ctx_name = source.get("name", "") if isinstance(source, dict) else ""
-            if ctx_name and ctx_name not in ("User", ""):
-                content = f"[{ctx_name}]: {content}"
-        elif src_type in ("Agent",) or "Agent" in source or "agent" in source:
-            role = "assistant"
-        else:
-            role = "system"
-        messages.append({"role": role, "content": content})
-
-    if context:
+        for msg in memory_msgs:
+            role, content = _context_msg_to_role_content(msg)
+            # Inject timestamp as system-level framing (not embedded in content)
+            ts = msg.get("timestamp", "")
+            if ts and role != "system":
+                ts_label = _parse_context_timestamp(ts)
+                if ts_label:
+                    messages.append(
+                        {"role": "system", "content": f"[The following message is from {ts_label}]"}
+                    )
+            messages.append({"role": role, "content": content})
         messages.append(
             {
                 "role": "system",
-                "content": "[End of recalled memories. Current conversation follows.]",
+                "content": "[End of recalled memories.]",
             }
         )
+
+    if conversation_msgs:
+        messages.append(
+            {
+                "role": "system",
+                "content": "[Recent messages from this channel for context:]",
+            }
+        )
+        for msg in conversation_msgs:
+            role, content = _context_msg_to_role_content(msg)
+            messages.append({"role": role, "content": content})
+        messages.append(
+            {
+                "role": "system",
+                "content": "[End of recent messages. The following is the message you should respond to.]",
+            }
+        )
+
+    if not memory_msgs and not conversation_msgs and context:
+        # Fallback for legacy context without context_type
+        for msg in context:
+            role, content = _context_msg_to_role_content(msg)
+            messages.append({"role": role, "content": content})
 
     # Inject external message context so the LLM can use origin-specific tools
     msg_metadata = message.get("metadata", {})

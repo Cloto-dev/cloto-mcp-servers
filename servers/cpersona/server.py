@@ -923,16 +923,12 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
     results = results[:limit]
     results.reverse()
 
-    # Convert to ClotoMessage-compatible format with timestamp annotations
+    # Convert to ClotoMessage-compatible format
+    # Note: timestamp is passed as a separate field (not embedded in content).
+    # The mind server uses it for system-level framing so the LLM cannot echo it.
     messages = []
     for r in results:
         content = r["content"]
-        # Annotate with localized timestamp so LLM knows when this memory is from
-        ts_raw = r.get("timestamp", "")
-        if ts_raw:
-            annotation = _format_memory_timestamp(ts_raw)
-            if annotation:
-                content = f"[Memory from {annotation}] {content}"
 
         msg: dict = {"content": content}
         if r.get("source"):
