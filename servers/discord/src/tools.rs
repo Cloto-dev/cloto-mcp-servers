@@ -13,12 +13,14 @@ use std::sync::Arc;
 pub fn tool_list() -> Vec<McpTool> {
     vec![
         send_message_schema(),
+        send_file_schema(),
         add_reaction_schema(),
         list_channels_schema(),
         get_history_schema(),
         search_messages_schema(),
         edit_message_schema(),
         delete_message_schema(),
+        set_presence_schema(),
     ]
 }
 
@@ -28,15 +30,18 @@ pub async fn execute(
     args: &Value,
     http: &Arc<serenity::Http>,
     config: &crate::config::DiscordConfig,
+    bot_context: &Arc<std::sync::Mutex<Option<serenity::Context>>>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     match tool_name {
         "send_message" => execute_send_message(args, http, config).await,
+        "send_file" => execute_send_file(args, http).await,
         "add_reaction" => execute_add_reaction(args, http).await,
         "list_channels" => execute_list_channels(args, http, config).await,
         "get_history" => execute_get_history(args, http).await,
         "search_messages" => execute_search_messages(args, http).await,
         "edit_message" => execute_edit_message(args, http, config).await,
         "delete_message" => execute_delete_message(args, http).await,
+        "set_presence" => execute_set_presence(args, bot_context).await,
         _ => Err(format!("Unknown tool: {tool_name}")),
     }
 }
@@ -46,7 +51,7 @@ pub async fn execute(
 fn send_message_schema() -> McpTool {
     McpTool {
         name: "send_message".into(),
-        description: "Send a message to a Discord channel. Long messages are automatically split at 2000 characters.".into(),
+        description: "Send a message to a Discord channel. Supports reply, embed for long messages, and auto-splitting.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -57,9 +62,42 @@ fn send_message_schema() -> McpTool {
                 "content": {
                     "type": "string",
                     "description": "Message content to send"
+                },
+                "reply_to": {
+                    "type": "string",
+                    "description": "Message ID to reply to (optional, sends as Discord Reply)"
                 }
             },
             "required": ["channel_id", "content"]
+        }),
+    }
+}
+
+fn send_file_schema() -> McpTool {
+    McpTool {
+        name: "send_file".into(),
+        description: "Send a file to a Discord channel as an attachment.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "channel_id": {
+                    "type": "string",
+                    "description": "Discord channel ID"
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Local file path to upload"
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Override filename for the attachment (optional)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Optional message text to accompany the file"
+                }
+            },
+            "required": ["channel_id", "file_path"]
         }),
     }
 }
@@ -215,6 +253,33 @@ fn delete_message_schema() -> McpTool {
     }
 }
 
+fn set_presence_schema() -> McpTool {
+    McpTool {
+        name: "set_presence".into(),
+        description: "Set the bot's online status and activity.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["online", "idle", "dnd", "invisible"],
+                    "description": "Online status"
+                },
+                "activity": {
+                    "type": "string",
+                    "description": "Activity text (optional)"
+                },
+                "activity_type": {
+                    "type": "string",
+                    "enum": ["playing", "watching", "listening", "competing"],
+                    "description": "Activity type (default: playing)"
+                }
+            },
+            "required": ["status"]
+        }),
+    }
+}
+
 // ── Tool Implementations ──
 
 fn parse_id(val: &Value, field: &str) -> Result<u64, String> {
@@ -244,6 +309,10 @@ async fn execute_send_message(
         .get("content")
         .and_then(|v| v.as_str())
         .ok_or("content is required")?;
+    let reply_to = args
+        .get("reply_to")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok());
 
     let content = if config.block_everyone {
         utils::sanitize_mentions(content)
@@ -252,15 +321,51 @@ async fn execute_send_message(
     };
 
     let channel = serenity::ChannelId::new(channel_id);
-    let chunks = utils::split_message(&content, 2000);
     let mut sent_ids = Vec::new();
 
-    for chunk in &chunks {
-        let msg = channel
-            .say(http, chunk)
-            .await
-            .map_err(|e| format!("Failed to send message: {e}"))?;
-        sent_ids.push(msg.id.to_string());
+    // Use embed for long messages
+    if content.len() > config.embed_threshold {
+        // Split into embed-sized chunks (4096 char limit per embed description)
+        let chunks = utils::split_message(&content, 4096);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let embed = serenity::CreateEmbed::new()
+                .description(chunk)
+                .color(config.embed_color);
+            let mut msg_builder = serenity::CreateMessage::new().embed(embed);
+            // Reply on first chunk only
+            if i == 0 {
+                if let Some(mid) = reply_to {
+                    msg_builder = msg_builder.reference_message(serenity::MessageReference::from((
+                        channel,
+                        serenity::MessageId::new(mid),
+                    )));
+                }
+            }
+            let msg = channel
+                .send_message(http, msg_builder)
+                .await
+                .map_err(|e| format!("Failed to send embed: {e}"))?;
+            sent_ids.push(msg.id.to_string());
+        }
+    } else {
+        // Plain text with splitting at 2000 chars
+        let chunks = utils::split_message(&content, 2000);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut msg_builder = serenity::CreateMessage::new().content(chunk);
+            if i == 0 {
+                if let Some(mid) = reply_to {
+                    msg_builder = msg_builder.reference_message(serenity::MessageReference::from((
+                        channel,
+                        serenity::MessageId::new(mid),
+                    )));
+                }
+            }
+            let msg = channel
+                .send_message(http, msg_builder)
+                .await
+                .map_err(|e| format!("Failed to send message: {e}"))?;
+            sent_ids.push(msg.id.to_string());
+        }
     }
 
     let result = text_result(format!(
@@ -269,6 +374,40 @@ async fn execute_send_message(
         sent_ids.join(", ")
     ));
     Ok((result, vec![]))
+}
+
+async fn execute_send_file(
+    args: &Value,
+    http: &Arc<serenity::Http>,
+) -> Result<(Value, Vec<JsonRpcNotification>), String> {
+    let channel_id = parse_id(args, "channel_id")?;
+    let file_path = args
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .ok_or("file_path is required")?;
+    let filename_override = args.get("filename").and_then(|v| v.as_str());
+    let content = args.get("content").and_then(|v| v.as_str());
+
+    let channel = serenity::ChannelId::new(channel_id);
+
+    let mut attachment = serenity::CreateAttachment::path(file_path)
+        .await
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+    if let Some(name) = filename_override {
+        attachment.filename = name.to_string();
+    }
+
+    let mut msg_builder = serenity::CreateMessage::new().add_file(attachment);
+    if let Some(text) = content {
+        msg_builder = msg_builder.content(text);
+    }
+
+    let msg = channel
+        .send_message(http, msg_builder)
+        .await
+        .map_err(|e| format!("Failed to send file: {e}"))?;
+
+    Ok((text_result(format!("File sent: {}", msg.id)), vec![]))
 }
 
 async fn execute_add_reaction(
@@ -423,18 +562,14 @@ async fn execute_search_messages(
     let mut collected: Vec<serenity::Message> = Vec::new();
 
     if let Some(time) = target_time {
-        // Search around a specific time
         let snowflake = utils::timestamp_to_snowflake(time);
         let anchor = serenity::MessageId::new(snowflake);
-
-        // Fetch initial batch around the target time
         let initial = channel
             .messages(http, serenity::GetMessages::new().around(anchor).limit(100))
             .await
             .map_err(|e| format!("Failed to fetch messages: {e}"))?;
         collected.extend(initial);
 
-        // Expand outward if we need more
         if !collected.is_empty() && collected.len() < scan_limit {
             collected.sort_by_key(|m| m.id);
             let mut before_cursor = collected.first().unwrap().id;
@@ -470,7 +605,6 @@ async fn execute_search_messages(
             }
         }
     } else {
-        // Search recent messages (descending from newest)
         let mut cursor: Option<serenity::MessageId> = None;
         while collected.len() < scan_limit {
             let batch_size = (scan_limit - collected.len()).min(100) as u8;
@@ -493,14 +627,12 @@ async fn execute_search_messages(
         }
     }
 
-    // Dedup and sort
     collected.sort_by_key(|m| m.id);
     collected.dedup_by_key(|m| m.id);
     if !sort_asc {
         collected.reverse();
     }
 
-    // Filter by query keyword
     let matched: Vec<&serenity::Message> = collected
         .iter()
         .filter(|m| m.content.to_lowercase().contains(&query) || m.author.name.to_lowercase().contains(&query))
@@ -584,4 +716,52 @@ async fn execute_delete_message(
         .map_err(|e| format!("Failed to delete message: {e}"))?;
 
     Ok((text_result("Message deleted"), vec![]))
+}
+
+async fn execute_set_presence(
+    args: &Value,
+    bot_context: &Arc<std::sync::Mutex<Option<serenity::Context>>>,
+) -> Result<(Value, Vec<JsonRpcNotification>), String> {
+    let status_str = args
+        .get("status")
+        .and_then(|v| v.as_str())
+        .ok_or("status is required")?;
+    let activity_text = args.get("activity").and_then(|v| v.as_str());
+    let activity_type = args
+        .get("activity_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("playing");
+
+    let status = match status_str {
+        "online" => serenity::OnlineStatus::Online,
+        "idle" => serenity::OnlineStatus::Idle,
+        "dnd" => serenity::OnlineStatus::DoNotDisturb,
+        "invisible" => serenity::OnlineStatus::Invisible,
+        _ => return Err(format!("Invalid status: {status_str}")),
+    };
+
+    let activity = activity_text.map(|text| {
+        let kind = match activity_type {
+            "watching" => serenity::ActivityType::Watching,
+            "listening" => serenity::ActivityType::Listening,
+            "competing" => serenity::ActivityType::Competing,
+            _ => serenity::ActivityType::Playing,
+        };
+        serenity::ActivityData {
+            name: text.to_string(),
+            kind,
+            state: None,
+            url: None,
+        }
+    });
+
+    let ctx = bot_context
+        .lock()
+        .map_err(|_| "Failed to lock context".to_string())?
+        .clone()
+        .ok_or("Discord context not available (not connected yet)")?;
+
+    ctx.set_presence(activity, status);
+
+    Ok((text_result(format!("Presence set to {status_str}")), vec![]))
 }

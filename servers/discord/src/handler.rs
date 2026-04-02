@@ -4,8 +4,10 @@
 //! to the main loop via an unbounded channel. The main loop then emits MGP
 //! notifications on stdout.
 
+use crate::utils;
 use serenity::all as serenity;
 use serenity::async_trait;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Events forwarded from Discord Gateway to the main loop.
@@ -13,6 +15,7 @@ use tokio::sync::mpsc;
 pub enum DiscordEvent {
     MessageCreate(Box<MessageData>),
     Ready(ReadyData),
+    Resumed,
 }
 
 #[derive(Debug)]
@@ -54,6 +57,8 @@ pub struct ReadyData {
 pub struct DiscordHandler {
     pub event_tx: mpsc::UnboundedSender<DiscordEvent>,
     pub allowed_channel_ids: Vec<u64>,
+    /// Shared slot to store Serenity Context for presence updates.
+    pub bot_context: Arc<std::sync::Mutex<Option<serenity::Context>>>,
 }
 
 #[async_trait]
@@ -77,6 +82,9 @@ impl serenity::EventHandler for DiscordHandler {
             return;
         }
 
+        // Strip bot mention from content so LLM doesn't see <@ID>
+        let clean_content = utils::strip_bot_mention(&msg.content, bot_id.get());
+
         let reference = msg
             .referenced_message
             .as_ref()
@@ -95,7 +103,7 @@ impl serenity::EventHandler for DiscordHandler {
                 .await
                 .unwrap_or_else(|| msg.author.name.clone()),
             author_bot: msg.author.bot,
-            content: msg.content.clone(),
+            content: clean_content,
             timestamp: msg.timestamp.to_string(),
             attachments: msg
                 .attachments
@@ -115,12 +123,17 @@ impl serenity::EventHandler for DiscordHandler {
             .send(DiscordEvent::MessageCreate(Box::new(data)));
     }
 
-    async fn ready(&self, _ctx: serenity::Context, ready: serenity::Ready) {
+    async fn ready(&self, ctx: serenity::Context, ready: serenity::Ready) {
         tracing::info!(
             "Discord connected as {} ({})",
             ready.user.name,
             ready.user.id
         );
+
+        // Store context for presence management tool
+        if let Ok(mut slot) = self.bot_context.lock() {
+            *slot = Some(ctx);
+        }
 
         let data = ReadyData {
             username: ready.user.name.clone(),
@@ -128,5 +141,10 @@ impl serenity::EventHandler for DiscordHandler {
             guild_count: ready.guilds.len(),
         };
         let _ = self.event_tx.send(DiscordEvent::Ready(data));
+    }
+
+    async fn resume(&self, _ctx: serenity::Context, _: serenity::ResumedEvent) {
+        tracing::info!("Discord Gateway resumed");
+        let _ = self.event_tx.send(DiscordEvent::Resumed);
     }
 }

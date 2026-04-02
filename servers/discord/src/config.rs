@@ -14,6 +14,16 @@ pub struct DiscordConfig {
     pub block_everyone: bool,
     /// Number of recent messages to include as conversation context (0 = disabled).
     pub context_history_limit: u8,
+    /// Reaction emoji for processing start.
+    pub reaction_processing: String,
+    /// Reaction emoji for successful completion.
+    pub reaction_done: String,
+    /// Reaction emoji for errors.
+    pub reaction_error: String,
+    /// Embed color (Discord blurple by default).
+    pub embed_color: u32,
+    /// Character threshold for switching from plain text to embed.
+    pub embed_threshold: usize,
 }
 
 impl DiscordConfig {
@@ -36,12 +46,32 @@ impl DiscordConfig {
             .unwrap_or(15)
             .min(50);
 
+        let reaction_processing =
+            env::var("DISCORD_REACTION_PROCESSING").unwrap_or_else(|_| "👀".into());
+        let reaction_done =
+            env::var("DISCORD_REACTION_DONE").unwrap_or_else(|_| "✅".into());
+        let reaction_error =
+            env::var("DISCORD_REACTION_ERROR").unwrap_or_else(|_| "⚠️".into());
+        let embed_color = env::var("DISCORD_EMBED_COLOR")
+            .ok()
+            .and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok())
+            .unwrap_or(0x5865F2);
+        let embed_threshold = env::var("DISCORD_EMBED_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1500);
+
         Self {
             bot_token,
             allowed_channel_ids,
             allowed_guild_ids,
             block_everyone,
             context_history_limit,
+            reaction_processing,
+            reaction_done,
+            reaction_error,
+            embed_color,
+            embed_threshold,
         }
     }
 

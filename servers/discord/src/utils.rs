@@ -58,6 +58,13 @@ pub fn truncate_str(s: &str, max_len: usize) -> String {
     format!("{}...", &s[..end])
 }
 
+/// Strip bot mention (`<@ID>` and `<@!ID>`) from message content.
+pub fn strip_bot_mention(content: &str, bot_id: u64) -> String {
+    let plain = format!("<@{bot_id}>");
+    let nick = format!("<@!{bot_id}>");
+    content.replace(&plain, "").replace(&nick, "").trim().to_string()
+}
+
 /// Strip @everyone and @here from a message.
 pub fn sanitize_mentions(text: &str) -> String {
     text.replace("@everyone", "@\u{200b}everyone")

@@ -1,4 +1,4 @@
-//! MGP Discord Server — Bidirectional Discord communication.
+//! MGP Discord Server v0.2.0 — Bidirectional Discord communication.
 //!
 //! Runs as a single process using stdio JSON-RPC transport + Discord Gateway.
 //! Server ID: `io.discord`
@@ -34,17 +34,15 @@ struct CallbackContext {
     channel_id: String,
     #[allow(dead_code)]
     guild_id: Option<String>,
-    #[allow(dead_code)]
     message_id: String,
     #[allow(dead_code)]
     author_name: String,
     /// Typing indicator guard — dropping this stops the typing indicator.
-    /// Serenity's `Typing` holds a `oneshot::Sender`; when dropped, the internal
-    /// refresh task sees `Closed` and exits.
     _typing: Option<serenity::http::Typing>,
 }
 
 type PendingCallbacks = Arc<Mutex<HashMap<String, CallbackContext>>>;
+type BotContext = Arc<std::sync::Mutex<Option<serenity::Context>>>;
 
 #[tokio::main]
 async fn main() {
@@ -57,7 +55,7 @@ async fn main() {
         )
         .init();
 
-    tracing::info!("MGP Discord Server starting (stdio + Gateway transport)");
+    tracing::info!("MGP Discord Server v0.2.0 starting");
 
     let config = DiscordConfig::from_env();
 
@@ -65,14 +63,17 @@ async fn main() {
         tracing::error!("DISCORD_BOT_TOKEN not set — Discord Gateway will not connect");
     }
 
-    // Shared stdout writer (Mutex for thread safety between stdin dispatch and Discord events)
+    // Shared stdout writer
     let stdout = Arc::new(Mutex::new(io::stdout()));
 
     // Pending callbacks: maps callback_id → CallbackContext for response routing
     let pending_callbacks: PendingCallbacks = Arc::new(Mutex::new(HashMap::new()));
 
-    // Bot user ID (set on Ready event, used for conversation context role assignment)
+    // Bot user ID (set eagerly via HTTP, updated on Ready)
     let bot_user_id = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    // Bot context for presence management (set on Ready)
+    let bot_context: BotContext = Arc::new(std::sync::Mutex::new(None));
 
     // Discord event channel
     let (discord_tx, mut discord_rx) = mpsc::unbounded_channel::<DiscordEvent>();
@@ -106,6 +107,7 @@ async fn main() {
         let handler = DiscordHandler {
             event_tx: discord_tx,
             allowed_channel_ids: config.allowed_channel_ids.clone(),
+            bot_context: bot_context.clone(),
         };
 
         match serenity::Client::builder(&config.bot_token, intents)
@@ -114,6 +116,18 @@ async fn main() {
         {
             Ok(mut client) => {
                 let http_arc = client.http.clone();
+
+                // Eagerly fetch bot user ID before gateway connects
+                match http_arc.get_current_user().await {
+                    Ok(user) => {
+                        bot_user_id.store(user.id.get(), std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!("Bot user ID resolved: {} ({})", user.name, user.id);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch bot user eagerly: {e}");
+                    }
+                }
+
                 tokio::spawn(async move {
                     if let Err(e) = client.start().await {
                         tracing::error!("Serenity client error: {e}");
@@ -136,7 +150,7 @@ async fn main() {
     loop {
         tokio::select! {
             Some(line) = stdin_rx.recv() => {
-                handle_stdin_line(&line, &stdout, &http, &config, &pending_callbacks).await;
+                handle_stdin_line(&line, &stdout, &http, &config, &pending_callbacks, &bot_context).await;
             }
             Some(event) = discord_rx.recv() => {
                 handle_discord_event(event, &stdout, &pending_callbacks, &http, &config, &bot_user_id).await;
@@ -154,6 +168,7 @@ async fn handle_stdin_line(
     http: &Option<Arc<serenity::Http>>,
     config: &Arc<DiscordConfig>,
     pending_callbacks: &PendingCallbacks,
+    bot_context: &BotContext,
 ) {
     let request: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -170,7 +185,8 @@ async fn handle_stdin_line(
         return;
     }
 
-    let (response, notifications) = dispatch(&request, http, config, pending_callbacks).await;
+    let (response, notifications) =
+        dispatch(&request, http, config, pending_callbacks, bot_context).await;
 
     // Emit notifications BEFORE the response (avatar pattern)
     for notif in &notifications {
@@ -184,17 +200,17 @@ async fn dispatch(
     http: &Option<Arc<serenity::Http>>,
     config: &Arc<DiscordConfig>,
     pending_callbacks: &PendingCallbacks,
+    bot_context: &BotContext,
 ) -> (JsonRpcResponse, Vec<JsonRpcNotification>) {
     match request.method.as_str() {
         "initialize" => (handle_initialize(request), vec![]),
         "tools/list" => (handle_tools_list(request), vec![]),
-        "tools/call" => handle_tools_call(request, http, config).await,
-        "mgp/callback/respond" => {
-            (handle_callback_respond(request, http, config, pending_callbacks).await, vec![])
-        }
+        "tools/call" => handle_tools_call(request, http, config, bot_context).await,
+        "mgp/callback/respond" => (
+            handle_callback_respond(request, http, config, pending_callbacks).await,
+            vec![],
+        ),
         "notifications/initialized" => {
-            // MCP initialized notification — no response needed but we already
-            // filtered notifications above. This is a safety fallback.
             (JsonRpcResponse::ok(request.id.clone(), json!({})), vec![])
         }
         _ => (
@@ -239,6 +255,7 @@ async fn handle_tools_call(
     request: &JsonRpcRequest,
     http: &Option<Arc<serenity::Http>>,
     config: &Arc<DiscordConfig>,
+    bot_context: &BotContext,
 ) -> (JsonRpcResponse, Vec<JsonRpcNotification>) {
     let Some(params) = &request.params else {
         return (
@@ -253,6 +270,24 @@ async fn handle_tools_call(
             vec![],
         );
     };
+
+    // set_presence doesn't require http
+    if tool_name == "set_presence" {
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or(Value::Object(serde_json::Map::new()));
+        return match tools::execute(tool_name, &args, &Arc::new(serenity::Http::new("")), config, bot_context).await {
+            Ok((result, notifications)) => (
+                JsonRpcResponse::ok(request.id.clone(), result),
+                notifications,
+            ),
+            Err(msg) => (
+                JsonRpcResponse::err(request.id.clone(), -32000, msg),
+                vec![],
+            ),
+        };
+    }
 
     let Some(http) = http else {
         return (
@@ -270,7 +305,7 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    match tools::execute(tool_name, &args, http, config).await {
+    match tools::execute(tool_name, &args, http, config, bot_context).await {
         Ok((result, notifications)) => (
             JsonRpcResponse::ok(request.id.clone(), result),
             notifications,
@@ -302,56 +337,79 @@ async fn handle_callback_respond(
         .unwrap_or("");
 
     if callback_id.is_empty() {
-        return JsonRpcResponse::err(
-            request.id.clone(),
-            -32602,
-            "callback_id is required",
-        );
+        return JsonRpcResponse::err(request.id.clone(), -32602, "callback_id is required");
     }
 
-    // Always remove the callback context first to stop the typing indicator,
-    // regardless of whether the response is empty or sending fails.
+    // Always remove the callback context first to stop the typing indicator.
     let ctx = pending_callbacks
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(callback_id);
 
     let Some(ctx) = ctx else {
-        tracing::warn!(callback_id = %callback_id, "No pending callback found — may have expired");
+        tracing::warn!(callback_id = %callback_id, "No pending callback found");
         return JsonRpcResponse::ok(
             request.id.clone(),
             json!({"status": "not_found", "callback_id": callback_id}),
         );
     };
 
-    // Typing indicator stops automatically when ctx (and its _typing guard) is dropped.
-
     let response = params
         .get("response")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // Empty response: clean up typing but skip sending a message
+    let channel_id: u64 = ctx.channel_id.parse().unwrap_or(0);
+    let message_id: u64 = ctx.message_id.parse().unwrap_or(0);
+
+    // Empty response: clean up typing but skip sending
     if response.is_empty() {
-        tracing::info!(callback_id = %callback_id, "Empty response — typing stopped, no message sent");
+        tracing::info!(callback_id = %callback_id, "Empty response — typing stopped");
         return JsonRpcResponse::ok(
             request.id.clone(),
-            json!({"status": "empty", "callback_id": callback_id, "channel_id": ctx.channel_id}),
+            json!({"status": "empty", "callback_id": callback_id}),
         );
     }
 
-    // Send the response to the original Discord channel
     let Some(http) = http else {
         return JsonRpcResponse::err(request.id.clone(), -32000, "Discord not connected");
     };
 
+    // Send as reply to the original message
     let send_args = json!({
         "channel_id": ctx.channel_id,
         "content": response,
+        "reply_to": ctx.message_id,
     });
 
-    match tools::execute("send_message", &send_args, http, config).await {
+    // Dummy bot_context (not needed for send_message)
+    let dummy_ctx: BotContext = Arc::new(std::sync::Mutex::new(None));
+
+    match tools::execute("send_message", &send_args, http, config, &dummy_ctx).await {
         Ok(_) => {
+            // Add completion reaction
+            if channel_id > 0 && message_id > 0 {
+                let emoji =
+                    serenity::ReactionType::Unicode(config.reaction_done.clone());
+                let _ = http
+                    .create_reaction(
+                        serenity::ChannelId::new(channel_id),
+                        serenity::MessageId::new(message_id),
+                        &emoji,
+                    )
+                    .await;
+                // Remove processing reaction
+                let processing_emoji =
+                    serenity::ReactionType::Unicode(config.reaction_processing.clone());
+                let _ = http
+                    .delete_reaction_me(
+                        serenity::ChannelId::new(channel_id),
+                        serenity::MessageId::new(message_id),
+                        &processing_emoji,
+                    )
+                    .await;
+            }
+
             tracing::info!(
                 callback_id = %callback_id,
                 channel_id = %ctx.channel_id,
@@ -363,12 +421,29 @@ async fn handle_callback_respond(
             )
         }
         Err(e) => {
+            // Add error reaction
+            if channel_id > 0 && message_id > 0 {
+                let emoji =
+                    serenity::ReactionType::Unicode(config.reaction_error.clone());
+                let _ = http
+                    .create_reaction(
+                        serenity::ChannelId::new(channel_id),
+                        serenity::MessageId::new(message_id),
+                        &emoji,
+                    )
+                    .await;
+            }
+
             tracing::error!(
                 callback_id = %callback_id,
                 error = %e,
                 "Failed to send callback response to Discord"
             );
-            JsonRpcResponse::err(request.id.clone(), -32000, format!("Discord send failed: {e}"))
+            JsonRpcResponse::err(
+                request.id.clone(),
+                -32000,
+                format!("Discord send failed: {e}"),
+            )
         }
     }
 }
@@ -385,9 +460,11 @@ async fn handle_discord_event(
         DiscordEvent::MessageCreate(msg) => {
             let callback_id = format!("discord-{}", msg.message_id);
 
-            // Start typing indicator (auto-refreshes until Typing guard is dropped)
+            let channel_id: u64 = msg.channel_id.parse().unwrap_or(0);
+            let msg_id: u64 = msg.message_id.parse().unwrap_or(0);
+
+            // Start typing indicator
             let typing = if let Some(http) = http {
-                let channel_id: u64 = msg.channel_id.parse().unwrap_or(0);
                 if channel_id > 0 {
                     let cid = serenity::ChannelId::new(channel_id);
                     Some(cid.start_typing(http))
@@ -398,7 +475,22 @@ async fn handle_discord_event(
                 None
             };
 
-            // Register pending callback context for response routing
+            // Add processing reaction
+            if let Some(http) = http {
+                if channel_id > 0 && msg_id > 0 {
+                    let emoji =
+                        serenity::ReactionType::Unicode(config.reaction_processing.clone());
+                    let _ = http
+                        .create_reaction(
+                            serenity::ChannelId::new(channel_id),
+                            serenity::MessageId::new(msg_id),
+                            &emoji,
+                        )
+                        .await;
+                }
+            }
+
+            // Register pending callback context
             if let Ok(mut cbs) = pending_callbacks.lock() {
                 cbs.insert(
                     callback_id.clone(),
@@ -415,8 +507,6 @@ async fn handle_discord_event(
             // Fetch recent channel history for short-term conversation context
             let conversation_context = if config.context_history_limit > 0 {
                 if let Some(http) = http {
-                    let channel_id: u64 = msg.channel_id.parse().unwrap_or(0);
-                    let msg_id: u64 = msg.message_id.parse().unwrap_or(0);
                     if channel_id > 0 && msg_id > 0 {
                         let cid = serenity::ChannelId::new(channel_id);
                         let mid = serenity::MessageId::new(msg_id);
@@ -429,7 +519,7 @@ async fn handle_discord_event(
                                     bot_user_id.load(std::sync::atomic::Ordering::Relaxed);
                                 messages
                                     .iter()
-                                    .rev() // oldest first
+                                    .rev()
                                     .filter(|m| !m.content.is_empty())
                                     .map(|m| {
                                         if m.author.id.get() == bot_id {
@@ -485,7 +575,7 @@ async fn handle_discord_event(
                 );
             }
 
-            // Emit callback request (MGP §13) — kernel will process and respond
+            // Emit callback request (MGP §13)
             let notif = JsonRpcNotification::new(
                 "notifications/mgp.callback.request",
                 Some(json!({
@@ -529,6 +619,18 @@ async fn handle_discord_event(
                         "Connected as {} ({} guilds)",
                         data.username, data.guild_count
                     ),
+                })),
+            );
+            write_message(stdout, &notif);
+        }
+        DiscordEvent::Resumed => {
+            let notif = JsonRpcNotification::new(
+                "notifications/mgp.lifecycle",
+                Some(json!({
+                    "server_id": "io.discord",
+                    "previous_state": "reconnecting",
+                    "new_state": "connected",
+                    "reason": "Gateway session resumed",
                 })),
             );
             write_message(stdout, &notif);
