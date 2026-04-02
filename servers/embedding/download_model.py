@@ -14,9 +14,11 @@ MINIML_FILES = {
 }
 
 # jina-v5-nano (retrieval variant with merged LoRA)
+# Uses external data format: model.onnx (header) + model.onnx_data (weights ~849MB)
 JINA_BASE = "https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval/resolve/main"
 JINA_FILES = {
     "model.onnx": f"{JINA_BASE}/onnx/model.onnx",
+    "model.onnx_data": f"{JINA_BASE}/onnx/model.onnx_data",
     "tokenizer.json": f"{JINA_BASE}/tokenizer.json",
 }
 
