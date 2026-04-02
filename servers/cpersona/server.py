@@ -79,6 +79,9 @@ CONFIDENCE_ENABLED = os.environ.get("CPERSONA_CONFIDENCE_ENABLED", "false").lowe
 COSINE_FLOOR = float(os.environ.get("CPERSONA_COSINE_FLOOR", "0.20"))
 COSINE_CEIL = float(os.environ.get("CPERSONA_COSINE_CEIL", "0.75"))
 DECAY_RATE = float(os.environ.get("CPERSONA_DECAY_RATE", "0.005"))
+DECAY_FLOOR = float(os.environ.get("CPERSONA_DECAY_FLOOR", "0.3"))
+MIN_TIME_RANGE_HOURS = float(os.environ.get("CPERSONA_MIN_TIME_RANGE_HOURS", "24"))
+REFERENCE_HOURS = float(os.environ.get("CPERSONA_REFERENCE_HOURS", "168"))  # 1 week
 RESOLVED_DECAY_FACTOR = float(os.environ.get("CPERSONA_RESOLVED_DECAY_FACTOR", "0.3"))
 TASK_MAX_RETRIES = int(os.environ.get("CPERSONA_TASK_MAX_RETRIES", "3"))
 TASK_RETRY_DELAY = int(os.environ.get("CPERSONA_TASK_RETRY_DELAY", "30"))  # seconds
@@ -893,13 +896,28 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
     else:
         results = await _recall_cascade(db, agent_id, query, limit, deep, channel)
 
+    # v2.4.4: Compute time range for dynamic decay
+    time_range_hours = 0.0
+    if CONFIDENCE_ENABLED and results:
+        range_row = await db.execute_fetchall(
+            "SELECT MIN(timestamp), MAX(timestamp) FROM memories WHERE agent_id = ?",
+            (agent_id,),
+        )
+        if range_row and range_row[0][0] and range_row[0][1]:
+            oldest = _parse_timestamp_utc(range_row[0][0])
+            newest = _parse_timestamp_utc(range_row[0][1])
+            if oldest and newest:
+                time_range_hours = max(0.0, (newest - oldest).total_seconds() / 3600)
+
     # v2.3.2+: Re-rank by confidence score before truncation (if enabled)
     if CONFIDENCE_ENABLED:
         for r in results:
             ts = r.get("timestamp", "")
             raw_cos = r.get("_cosine")
             is_resolved = r.get("_resolved", False)
-            r["_confidence_score"] = _compute_confidence(raw_cos, ts, resolved=is_resolved, deep=deep)["score"]
+            r["_confidence_score"] = _compute_confidence(
+                raw_cos, ts, resolved=is_resolved, deep=deep, time_range_hours=time_range_hours,
+            )["score"]
         results.sort(key=lambda r: r.get("_confidence_score", 0), reverse=True)
 
     # v2.4: Autocut — detect score gap and remove noise results
@@ -929,7 +947,9 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
             raw_cosine = r.get("_cosine")
             ts = r.get("timestamp", "")
             is_resolved = r.get("_resolved", False)
-            msg["confidence"] = _compute_confidence(raw_cosine, ts, resolved=is_resolved, deep=deep)
+            msg["confidence"] = _compute_confidence(
+                raw_cosine, ts, resolved=is_resolved, deep=deep, time_range_hours=time_range_hours,
+            )
         # Remove internal tracking keys
         r.pop("_rid", None)
         r.pop("_cosine", None)
@@ -1330,12 +1350,17 @@ def _compute_confidence(
     *,
     resolved: bool = False,
     deep: bool = False,
+    time_range_hours: float = 0.0,
 ) -> dict:
     """Compute confidence metadata for a recall result (v2.3.2+).
 
     Returns a dict with 'age_hours', 'score', and optionally 'cosine', 'resolved'.
     Score = sqrt(norm_cos × time_decay) × completion_factor.
     When deep=True, time_decay and completion_factor are both 1.0.
+
+    v2.4.4: Dynamic time decay — effective_rate adapts to the agent's
+    memory time range. Newer agents decay faster, established agents
+    have a gentler curve.
     """
     now = datetime.now(timezone.utc)
     age_hours = 0.0
@@ -1345,7 +1370,16 @@ def _compute_confidence(
         age_hours = max(0.0, (now - parsed).total_seconds() / 3600)
 
     # v2.3.3: deep recall disables decay
-    time_decay = 1.0 if deep else 1.0 / (1.0 + age_hours * DECAY_RATE)
+    if deep:
+        time_decay = 1.0
+    elif time_range_hours > 0:
+        # v2.4.4: Dynamic rate — scale DECAY_RATE by time_range
+        effective_range = max(MIN_TIME_RANGE_HOURS, time_range_hours)
+        effective_rate = DECAY_RATE / max(1.0, effective_range / REFERENCE_HOURS)
+        time_decay = max(DECAY_FLOOR, 1.0 / (1.0 + age_hours * effective_rate))
+    else:
+        # Fallback: original fixed rate (backward compatible)
+        time_decay = 1.0 / (1.0 + age_hours * DECAY_RATE)
     completion_factor = 1.0 if (deep or not resolved) else RESOLVED_DECAY_FACTOR
 
     confidence: dict = {"age_hours": round(age_hours, 1)}
