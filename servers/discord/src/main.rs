@@ -505,14 +505,20 @@ async fn handle_discord_event(
             }
 
             // Fetch recent channel history for short-term conversation context
-            let conversation_context = if config.context_history_limit > 0 {
+            // Reduce context for short messages to prevent history from dominating
+            let effective_limit = if msg.content.len() < 20 {
+                config.context_history_limit.min(5)
+            } else {
+                config.context_history_limit
+            };
+            let conversation_context = if effective_limit > 0 {
                 if let Some(http) = http {
                     if channel_id > 0 && msg_id > 0 {
                         let cid = serenity::ChannelId::new(channel_id);
                         let mid = serenity::MessageId::new(msg_id);
                         let builder = serenity::GetMessages::new()
                             .before(mid)
-                            .limit(config.context_history_limit);
+                            .limit(effective_limit);
                         match cid.messages(http, builder).await {
                             Ok(messages) => {
                                 let bot_id =

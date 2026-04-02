@@ -295,7 +295,8 @@ def build_chat_messages(
         messages.append(
             {
                 "role": "system",
-                "content": "[Recent messages from this channel for context:]",
+                "content": "[Recent messages from this channel for background context only. "
+                "Do NOT continue or repeat these topics unless the user explicitly asks about them.]",
             }
         )
         for msg in conversation_msgs:
@@ -304,7 +305,8 @@ def build_chat_messages(
         messages.append(
             {
                 "role": "system",
-                "content": "[End of recent messages. The following is the message you should respond to.]",
+                "content": "[END OF CONTEXT. IMPORTANT: The next message is the CURRENT user message. "
+                "Respond ONLY to it. Ignore conversation history unless directly relevant.]",
             }
         )
 
