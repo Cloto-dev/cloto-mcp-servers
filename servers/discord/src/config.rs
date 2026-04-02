@@ -24,6 +24,10 @@ pub struct DiscordConfig {
     pub embed_color: u32,
     /// Character threshold for switching from plain text to embed.
     pub embed_threshold: usize,
+    /// Discord user IDs authorized for backtick direct tool commands. Empty = disabled.
+    pub direct_tool_users: Vec<u64>,
+    /// Ecosystem tool names available via backtick commands (routed via kernel tool_hint).
+    pub direct_tool_ecosystem: Vec<String>,
 }
 
 impl DiscordConfig {
@@ -48,10 +52,8 @@ impl DiscordConfig {
 
         let reaction_processing =
             env::var("DISCORD_REACTION_PROCESSING").unwrap_or_else(|_| "👀".into());
-        let reaction_done =
-            env::var("DISCORD_REACTION_DONE").unwrap_or_else(|_| "✅".into());
-        let reaction_error =
-            env::var("DISCORD_REACTION_ERROR").unwrap_or_else(|_| "⚠️".into());
+        let reaction_done = env::var("DISCORD_REACTION_DONE").unwrap_or_else(|_| "✅".into());
+        let reaction_error = env::var("DISCORD_REACTION_ERROR").unwrap_or_else(|_| "⚠️".into());
         let embed_color = env::var("DISCORD_EMBED_COLOR")
             .ok()
             .and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok())
@@ -60,6 +62,14 @@ impl DiscordConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1500);
+
+        let direct_tool_users = parse_id_list("DISCORD_DIRECT_TOOL_USERS");
+        let direct_tool_ecosystem: Vec<String> = env::var("DISCORD_DIRECT_TOOL_ECOSYSTEM")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
 
         Self {
             bot_token,
@@ -72,6 +82,8 @@ impl DiscordConfig {
             reaction_error,
             embed_color,
             embed_threshold,
+            direct_tool_users,
+            direct_tool_ecosystem,
         }
     }
 

@@ -16,21 +16,25 @@ pub enum DiscordEvent {
     MessageCreate(Box<MessageData>),
     Ready(ReadyData),
     Resumed,
+    ShardStageUpdate { old: String, new: String },
 }
 
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct MessageData {
     pub guild_id: Option<String>,
+    pub guild_name: Option<String>,
     pub channel_id: String,
     pub message_id: String,
     pub author_id: String,
     pub author_name: String,
     pub author_bot: bool,
+    pub author_roles: Vec<String>,
     pub content: String,
     pub timestamp: String,
     pub attachments: Vec<AttachmentData>,
     pub reference: Option<ReferenceData>,
+    pub thread_info: Option<ThreadInfo>,
 }
 
 #[derive(Debug)]
@@ -48,6 +52,13 @@ pub struct ReferenceData {
 }
 
 #[derive(Debug)]
+pub struct ThreadInfo {
+    pub parent_id: String,
+    pub thread_name: String,
+    pub archived: bool,
+}
+
+#[derive(Debug)]
 pub struct ReadyData {
     pub username: String,
     pub bot_user_id: u64,
@@ -57,6 +68,8 @@ pub struct ReadyData {
 pub struct DiscordHandler {
     pub event_tx: mpsc::UnboundedSender<DiscordEvent>,
     pub allowed_channel_ids: Vec<u64>,
+    /// Discord user IDs authorized for backtick direct tool commands.
+    pub direct_tool_users: Vec<u64>,
     /// Shared slot to store Serenity Context for presence updates.
     pub bot_context: Arc<std::sync::Mutex<Option<serenity::Context>>>,
 }
@@ -69,20 +82,53 @@ impl serenity::EventHandler for DiscordHandler {
             return;
         }
 
-        // Channel filter
-        if !self.allowed_channel_ids.is_empty()
-            && !self.allowed_channel_ids.contains(&msg.channel_id.get())
-        {
-            return;
+        // Resolve thread info from guild cache (before channel filter for parent check)
+        let thread_info = msg.guild_id.and_then(|gid| {
+            ctx.cache.guild(gid).and_then(|guild| {
+                let ch = guild.channels.get(&msg.channel_id)?;
+                match ch.kind {
+                    serenity::ChannelType::PublicThread
+                    | serenity::ChannelType::PrivateThread
+                    | serenity::ChannelType::NewsThread => Some(ThreadInfo {
+                        parent_id: ch.parent_id.map(|p| p.to_string()).unwrap_or_default(),
+                        thread_name: ch.name.clone(),
+                        archived: ch.thread_metadata.as_ref().is_some_and(|tm| tm.archived),
+                    }),
+                    _ => None,
+                }
+            })
+        });
+
+        // Channel filter: check channel_id OR parent_id for threads
+        if !self.allowed_channel_ids.is_empty() {
+            let channel_allowed = self.allowed_channel_ids.contains(&msg.channel_id.get());
+            let parent_allowed = thread_info.as_ref().is_some_and(|ti| {
+                ti.parent_id
+                    .parse::<u64>()
+                    .is_ok_and(|pid| self.allowed_channel_ids.contains(&pid))
+            });
+            if !channel_allowed && !parent_allowed {
+                return;
+            }
         }
 
-        // Only respond to messages that mention the bot
-        let bot_id = ctx.cache.current_user().id;
-        if !msg.mentions_user_id(bot_id) {
-            return;
+        // Direct tool commands bypass mention requirement
+        let is_direct_command = !self.direct_tool_users.is_empty()
+            && self.direct_tool_users.contains(&msg.author.id.get())
+            && msg.content.trim().starts_with('`')
+            && !msg.content.trim().starts_with("```")
+            && msg.content.trim().ends_with('`');
+
+        if !is_direct_command {
+            // Only respond to messages that mention the bot
+            let bot_id = ctx.cache.current_user().id;
+            if !msg.mentions_user_id(bot_id) {
+                return;
+            }
         }
 
         // Strip bot mention from content so LLM doesn't see <@ID>
+        let bot_id = ctx.cache.current_user().id;
         let clean_content = utils::strip_bot_mention(&msg.content, bot_id.get());
 
         let reference = msg
@@ -93,8 +139,27 @@ impl serenity::EventHandler for DiscordHandler {
                 content: referenced.content.clone(),
             });
 
+        // Resolve author roles from cache
+        let author_roles = msg.member.as_ref().map_or_else(Vec::new, |member| {
+            msg.guild_id
+                .and_then(|gid| ctx.cache.guild(gid))
+                .map_or_else(Vec::new, |guild| {
+                    member
+                        .roles
+                        .iter()
+                        .filter_map(|rid| guild.roles.get(rid).map(|r| r.name.clone()))
+                        .collect()
+                })
+        });
+
+        // Resolve guild name from cache
+        let guild_name = msg
+            .guild_id
+            .and_then(|gid| ctx.cache.guild(gid).map(|g| g.name.clone()));
+
         let data = MessageData {
             guild_id: msg.guild_id.map(|id| id.to_string()),
+            guild_name,
             channel_id: msg.channel_id.to_string(),
             message_id: msg.id.to_string(),
             author_id: msg.author.id.to_string(),
@@ -103,6 +168,7 @@ impl serenity::EventHandler for DiscordHandler {
                 .await
                 .unwrap_or_else(|| msg.author.name.clone()),
             author_bot: msg.author.bot,
+            author_roles,
             content: clean_content,
             timestamp: msg.timestamp.to_string(),
             attachments: msg
@@ -116,6 +182,7 @@ impl serenity::EventHandler for DiscordHandler {
                 })
                 .collect(),
             reference,
+            thread_info,
         };
 
         let _ = self
@@ -146,5 +213,16 @@ impl serenity::EventHandler for DiscordHandler {
     async fn resume(&self, _ctx: serenity::Context, _: serenity::ResumedEvent) {
         tracing::info!("Discord Gateway resumed");
         let _ = self.event_tx.send(DiscordEvent::Resumed);
+    }
+
+    async fn shard_stage_update(
+        &self,
+        _ctx: serenity::Context,
+        event: serenity::ShardStageUpdateEvent,
+    ) {
+        let _ = self.event_tx.send(DiscordEvent::ShardStageUpdate {
+            old: format!("{:?}", event.old),
+            new: format!("{:?}", event.new),
+        });
     }
 }

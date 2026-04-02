@@ -16,6 +16,8 @@ pub fn tool_list() -> Vec<McpTool> {
         send_file_schema(),
         add_reaction_schema(),
         list_channels_schema(),
+        list_threads_schema(),
+        create_thread_schema(),
         get_history_schema(),
         search_messages_schema(),
         edit_message_schema(),
@@ -23,6 +25,22 @@ pub fn tool_list() -> Vec<McpTool> {
         set_presence_schema(),
     ]
 }
+
+/// All bridge-native tool names (used for direct command routing).
+pub const BRIDGE_TOOL_NAMES: &[&str] = &[
+    "send_message",
+    "send_file",
+    "add_reaction",
+    "list_channels",
+    "list_threads",
+    "create_thread",
+    "get_history",
+    "search_messages",
+    "edit_message",
+    "delete_message",
+    "set_presence",
+    "bridge_status",
+];
 
 /// Execute a tool call. Returns `(result_value, notifications_to_emit)`.
 pub async fn execute(
@@ -37,6 +55,8 @@ pub async fn execute(
         "send_file" => execute_send_file(args, http).await,
         "add_reaction" => execute_add_reaction(args, http).await,
         "list_channels" => execute_list_channels(args, http, config).await,
+        "list_threads" => execute_list_threads(args, http, config).await,
+        "create_thread" => execute_create_thread(args, http).await,
         "get_history" => execute_get_history(args, http).await,
         "search_messages" => execute_search_messages(args, http).await,
         "edit_message" => execute_edit_message(args, http, config).await,
@@ -335,10 +355,9 @@ async fn execute_send_message(
             // Reply on first chunk only
             if i == 0 {
                 if let Some(mid) = reply_to {
-                    msg_builder = msg_builder.reference_message(serenity::MessageReference::from((
-                        channel,
-                        serenity::MessageId::new(mid),
-                    )));
+                    msg_builder = msg_builder.reference_message(serenity::MessageReference::from(
+                        (channel, serenity::MessageId::new(mid)),
+                    ));
                 }
             }
             let msg = channel
@@ -354,10 +373,9 @@ async fn execute_send_message(
             let mut msg_builder = serenity::CreateMessage::new().content(chunk);
             if i == 0 {
                 if let Some(mid) = reply_to {
-                    msg_builder = msg_builder.reference_message(serenity::MessageReference::from((
-                        channel,
-                        serenity::MessageId::new(mid),
-                    )));
+                    msg_builder = msg_builder.reference_message(serenity::MessageReference::from(
+                        (channel, serenity::MessageId::new(mid)),
+                    ));
                 }
             }
             let msg = channel
@@ -451,13 +469,33 @@ async fn execute_list_channels(
 
     let text_channels: Vec<Value> = channels
         .values()
-        .filter(|c| c.kind == serenity::ChannelType::Text)
+        .filter(|c| {
+            matches!(
+                c.kind,
+                serenity::ChannelType::Text
+                    | serenity::ChannelType::News
+                    | serenity::ChannelType::Forum
+            )
+        })
         .map(|c| {
-            json!({
+            let type_str = match c.kind {
+                serenity::ChannelType::News => "news",
+                serenity::ChannelType::Forum => "forum",
+                _ => "text",
+            };
+            let mut entry = json!({
                 "id": c.id.to_string(),
                 "name": c.name,
                 "topic": c.topic,
-            })
+                "type": type_str,
+            });
+            if let Some(parent) = c.parent_id {
+                entry
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("parent_id".into(), json!(parent.to_string()));
+            }
+            entry
         })
         .collect();
 
@@ -545,10 +583,7 @@ async fn execute_search_messages(
         .and_then(|v| v.as_u64())
         .unwrap_or(200)
         .min(500) as usize;
-    let sort_asc = args
-        .get("sort")
-        .and_then(|v| v.as_str())
-        == Some("asc");
+    let sort_asc = args.get("sort").and_then(|v| v.as_str()) == Some("asc");
 
     let channel = serenity::ChannelId::new(channel_id);
     let jst_offset = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
@@ -580,7 +615,12 @@ async fn execute_search_messages(
                 let batch_size = (scan_limit - collected.len()).min(100) as u8;
 
                 let older = channel
-                    .messages(http, serenity::GetMessages::new().before(before_cursor).limit(batch_size))
+                    .messages(
+                        http,
+                        serenity::GetMessages::new()
+                            .before(before_cursor)
+                            .limit(batch_size),
+                    )
                     .await
                     .unwrap_or_default();
                 if !older.is_empty() {
@@ -590,7 +630,12 @@ async fn execute_search_messages(
 
                 if collected.len() < scan_limit {
                     let newer = channel
-                        .messages(http, serenity::GetMessages::new().after(after_cursor).limit(batch_size))
+                        .messages(
+                            http,
+                            serenity::GetMessages::new()
+                                .after(after_cursor)
+                                .limit(batch_size),
+                        )
                         .await
                         .unwrap_or_default();
                     if !newer.is_empty() {
@@ -609,7 +654,9 @@ async fn execute_search_messages(
         while collected.len() < scan_limit {
             let batch_size = (scan_limit - collected.len()).min(100) as u8;
             let builder = if let Some(before) = cursor {
-                serenity::GetMessages::new().before(before).limit(batch_size)
+                serenity::GetMessages::new()
+                    .before(before)
+                    .limit(batch_size)
             } else {
                 serenity::GetMessages::new().limit(batch_size)
             };
@@ -635,7 +682,10 @@ async fn execute_search_messages(
 
     let matched: Vec<&serenity::Message> = collected
         .iter()
-        .filter(|m| m.content.to_lowercase().contains(&query) || m.author.name.to_lowercase().contains(&query))
+        .filter(|m| {
+            m.content.to_lowercase().contains(&query)
+                || m.author.name.to_lowercase().contains(&query)
+        })
         .collect();
 
     let formatted: Vec<String> = matched
@@ -658,7 +708,11 @@ async fn execute_search_messages(
         .collect();
 
     let result = text_result(if formatted.is_empty() {
-        format!("No messages matching '{}' found (scanned {} messages)", query, collected.len())
+        format!(
+            "No messages matching '{}' found (scanned {} messages)",
+            query,
+            collected.len()
+        )
     } else {
         format!(
             "Found {} matching messages (scanned {}):\n{}",
@@ -764,4 +818,152 @@ async fn execute_set_presence(
     ctx.set_presence(activity, status);
 
     Ok((text_result(format!("Presence set to {status_str}")), vec![]))
+}
+
+// ── Thread Tools ──
+
+fn list_threads_schema() -> McpTool {
+    McpTool {
+        name: "list_threads".into(),
+        description: "List active threads in a Discord guild.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "guild_id": {
+                    "type": "string",
+                    "description": "Discord guild (server) ID"
+                }
+            },
+            "required": ["guild_id"]
+        }),
+    }
+}
+
+async fn execute_list_threads(
+    args: &Value,
+    http: &Arc<serenity::Http>,
+    config: &crate::config::DiscordConfig,
+) -> Result<(Value, Vec<JsonRpcNotification>), String> {
+    let guild_id = parse_id(args, "guild_id")?;
+
+    if !config.is_guild_allowed(guild_id) {
+        return Err(format!("Guild {guild_id} is not in allowed list"));
+    }
+
+    let guild = serenity::GuildId::new(guild_id);
+    let threads_data = guild
+        .get_active_threads(http)
+        .await
+        .map_err(|e| format!("Failed to fetch threads: {e}"))?;
+
+    let threads: Vec<Value> = threads_data
+        .threads
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id.to_string(),
+                "name": t.name,
+                "parent_id": t.parent_id.map(|p| p.to_string()),
+                "type": match t.kind {
+                    serenity::ChannelType::PublicThread => "public_thread",
+                    serenity::ChannelType::PrivateThread => "private_thread",
+                    serenity::ChannelType::NewsThread => "news_thread",
+                    _ => "thread",
+                },
+                "archived": t.thread_metadata.as_ref().is_some_and(|tm| tm.archived),
+                "message_count": t.message_count,
+            })
+        })
+        .collect();
+
+    let result = json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::to_string_pretty(&threads).unwrap_or_default()
+        }]
+    });
+    Ok((result, vec![]))
+}
+
+fn create_thread_schema() -> McpTool {
+    McpTool {
+        name: "create_thread".into(),
+        description:
+            "Create a new thread in a Discord channel, optionally from an existing message.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "channel_id": {
+                    "type": "string",
+                    "description": "Channel ID to create thread in"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Thread name (2-100 characters)"
+                },
+                "message_id": {
+                    "type": "string",
+                    "description": "Message ID to create thread from (optional)"
+                },
+                "auto_archive_minutes": {
+                    "type": "integer",
+                    "enum": [60, 1440, 4320, 10080],
+                    "description": "Minutes until auto-archive (default: 1440 = 24h)"
+                }
+            },
+            "required": ["channel_id", "name"]
+        }),
+    }
+}
+
+async fn execute_create_thread(
+    args: &Value,
+    http: &Arc<serenity::Http>,
+) -> Result<(Value, Vec<JsonRpcNotification>), String> {
+    let channel_id = parse_id(args, "channel_id")?;
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("name is required")?;
+    let message_id = args
+        .get("message_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok());
+    let archive_minutes = args
+        .get("auto_archive_minutes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1440) as u16;
+
+    let archive_duration = match archive_minutes {
+        60 => serenity::AutoArchiveDuration::OneHour,
+        4320 => serenity::AutoArchiveDuration::ThreeDays,
+        10080 => serenity::AutoArchiveDuration::OneWeek,
+        _ => serenity::AutoArchiveDuration::OneDay,
+    };
+
+    let cid = serenity::ChannelId::new(channel_id);
+
+    let thread = if let Some(mid) = message_id {
+        let builder = serenity::CreateThread::new(name).auto_archive_duration(archive_duration);
+        cid.create_thread_from_message(http, serenity::MessageId::new(mid), builder)
+            .await
+            .map_err(|e| format!("Failed to create thread from message: {e}"))?
+    } else {
+        let builder = serenity::CreateThread::new(name)
+            .kind(serenity::ChannelType::PublicThread)
+            .auto_archive_duration(archive_duration);
+        cid.create_thread(http, builder)
+            .await
+            .map_err(|e| format!("Failed to create thread: {e}"))?
+    };
+
+    let result = json!({
+        "id": thread.id.to_string(),
+        "name": thread.name,
+        "parent_id": thread.parent_id.map(|p| p.to_string()),
+    });
+    Ok((
+        text_result(serde_json::to_string_pretty(&result).unwrap_or_default()),
+        vec![],
+    ))
 }

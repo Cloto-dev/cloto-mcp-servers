@@ -62,7 +62,48 @@ pub fn truncate_str(s: &str, max_len: usize) -> String {
 pub fn strip_bot_mention(content: &str, bot_id: u64) -> String {
     let plain = format!("<@{bot_id}>");
     let nick = format!("<@!{bot_id}>");
-    content.replace(&plain, "").replace(&nick, "").trim().to_string()
+    content
+        .replace(&plain, "")
+        .replace(&nick, "")
+        .trim()
+        .to_string()
+}
+
+/// Parse a backtick-wrapped direct tool command.
+///
+/// Format: `` `tool_name [key=value ...]` ``
+///
+/// Returns `None` if the message isn't a valid backtick command or the tool
+/// name isn't in `known_tools`.
+pub fn parse_direct_command(
+    content: &str,
+    known_tools: &[&str],
+) -> Option<(String, std::collections::HashMap<String, String>)> {
+    let trimmed = content.trim();
+    // Must be wrapped in exactly one pair of backticks (not triple ```)
+    if !trimmed.starts_with('`') || !trimmed.ends_with('`') || trimmed.starts_with("```") {
+        return None;
+    }
+    let inner = trimmed[1..trimmed.len() - 1].trim();
+    if inner.is_empty() {
+        return None;
+    }
+
+    let mut parts = inner.split_whitespace();
+    let tool_name = parts.next()?.to_string();
+
+    if !known_tools.contains(&tool_name.as_str()) {
+        return None;
+    }
+
+    let mut args = std::collections::HashMap::new();
+    for part in parts {
+        if let Some((key, value)) = part.split_once('=') {
+            args.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    Some((tool_name, args))
 }
 
 /// Strip @everyone and @here from a message.
@@ -105,5 +146,43 @@ mod tests {
         let output = sanitize_mentions(input);
         assert!(!output.contains("@everyone"));
         assert!(!output.contains("@here"));
+    }
+
+    #[test]
+    fn test_parse_direct_command_valid() {
+        let tools = vec!["get_history", "list_channels", "recall"];
+        let result = parse_direct_command("`get_history limit=5`", &tools);
+        assert!(result.is_some());
+        let (name, args) = result.unwrap();
+        assert_eq!(name, "get_history");
+        assert_eq!(args.get("limit").unwrap(), "5");
+    }
+
+    #[test]
+    fn test_parse_direct_command_no_args() {
+        let tools = vec!["list_channels"];
+        let result = parse_direct_command("`list_channels`", &tools);
+        assert!(result.is_some());
+        let (name, args) = result.unwrap();
+        assert_eq!(name, "list_channels");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_direct_command_unknown_tool() {
+        let tools = vec!["get_history"];
+        assert!(parse_direct_command("`unknown_tool`", &tools).is_none());
+    }
+
+    #[test]
+    fn test_parse_direct_command_triple_backtick() {
+        let tools = vec!["get_history"];
+        assert!(parse_direct_command("```get_history```", &tools).is_none());
+    }
+
+    #[test]
+    fn test_parse_direct_command_normal_text() {
+        let tools = vec!["get_history"];
+        assert!(parse_direct_command("hello world", &tools).is_none());
     }
 }

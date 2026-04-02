@@ -302,8 +302,8 @@
       "name": "Discord Bridge",
       "description": "Bidirectional Discord communication — receive messages via MGP events, send via MCP tools",
       "category": "io",
-      "version": "0.2.0",
-      "changelog": "Reply format, auto-reactions, embed for long messages, mention stripping, file sending, presence management, error reactions",
+      "version": "0.3.0",
+      "changelog": "Thread support (list_threads, create_thread), direct tool execution (backtick commands), bridge_status tool, author roles/guild name in context, shard lifecycle events, generalized kernel tool_hint",
       "directory": "discord",
       "runtime": "rust",
       "bin_name": "mgp-discord",
@@ -314,7 +314,9 @@
       "optional_env_vars": [
         { "key": "ALLOWED_CHANNEL_IDS", "default": "", "description": "Comma-separated channel IDs to monitor (empty = all)" },
         { "key": "ALLOWED_GUILD_IDS", "default": "", "description": "Comma-separated guild IDs (empty = all)" },
-        { "key": "BLOCK_EVERYONE", "default": "true", "description": "Block @everyone/@here in outgoing messages" }
+        { "key": "BLOCK_EVERYONE", "default": "true", "description": "Block @everyone/@here in outgoing messages" },
+        { "key": "DISCORD_DIRECT_TOOL_USERS", "default": "", "description": "Comma-separated Discord user IDs authorized for backtick tool commands" },
+        { "key": "DISCORD_DIRECT_TOOL_ECOSYSTEM", "default": "", "description": "Comma-separated ecosystem tool names available via backtick commands" }
       ],
       "tags": ["discord", "bridge", "mgp", "io"],
       "trust_level": "standard",

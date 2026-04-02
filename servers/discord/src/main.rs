@@ -1,4 +1,4 @@
-//! MGP Discord Server v0.2.0 — Bidirectional Discord communication.
+//! MGP Discord Server v0.3.0 — Bidirectional Discord communication.
 //!
 //! Runs as a single process using stdio JSON-RPC transport + Discord Gateway.
 //! Server ID: `io.discord`
@@ -44,6 +44,16 @@ struct CallbackContext {
 type PendingCallbacks = Arc<Mutex<HashMap<String, CallbackContext>>>;
 type BotContext = Arc<std::sync::Mutex<Option<serenity::Context>>>;
 
+/// Internal counters for bridge health monitoring.
+struct BridgeStats {
+    connected_since: std::sync::Mutex<Option<std::time::Instant>>,
+    messages_received: std::sync::atomic::AtomicU64,
+    messages_sent: std::sync::atomic::AtomicU64,
+    errors: std::sync::atomic::AtomicU64,
+    last_event_at: std::sync::Mutex<Option<std::time::Instant>>,
+    start_time: std::time::Instant,
+}
+
 #[tokio::main]
 async fn main() {
     // Tracing to stderr (stdout is reserved for JSON-RPC)
@@ -55,7 +65,16 @@ async fn main() {
         )
         .init();
 
-    tracing::info!("MGP Discord Server v0.2.0 starting");
+    tracing::info!("MGP Discord Server v0.3.0 starting");
+
+    let bridge_stats = Arc::new(BridgeStats {
+        connected_since: std::sync::Mutex::new(None),
+        messages_received: std::sync::atomic::AtomicU64::new(0),
+        messages_sent: std::sync::atomic::AtomicU64::new(0),
+        errors: std::sync::atomic::AtomicU64::new(0),
+        last_event_at: std::sync::Mutex::new(None),
+        start_time: std::time::Instant::now(),
+    });
 
     let config = DiscordConfig::from_env();
 
@@ -107,6 +126,7 @@ async fn main() {
         let handler = DiscordHandler {
             event_tx: discord_tx,
             allowed_channel_ids: config.allowed_channel_ids.clone(),
+            direct_tool_users: config.direct_tool_users.clone(),
             bot_context: bot_context.clone(),
         };
 
@@ -150,10 +170,10 @@ async fn main() {
     loop {
         tokio::select! {
             Some(line) = stdin_rx.recv() => {
-                handle_stdin_line(&line, &stdout, &http, &config, &pending_callbacks, &bot_context).await;
+                handle_stdin_line(&line, &stdout, &http, &config, &pending_callbacks, &bot_context, &bridge_stats).await;
             }
             Some(event) = discord_rx.recv() => {
-                handle_discord_event(event, &stdout, &pending_callbacks, &http, &config, &bot_user_id).await;
+                handle_discord_event(event, &stdout, &pending_callbacks, &http, &config, &bot_user_id, &bridge_stats).await;
             }
             else => break,
         }
@@ -169,6 +189,7 @@ async fn handle_stdin_line(
     config: &Arc<DiscordConfig>,
     pending_callbacks: &PendingCallbacks,
     bot_context: &BotContext,
+    bridge_stats: &Arc<BridgeStats>,
 ) {
     let request: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -185,8 +206,15 @@ async fn handle_stdin_line(
         return;
     }
 
-    let (response, notifications) =
-        dispatch(&request, http, config, pending_callbacks, bot_context).await;
+    let (response, notifications) = dispatch(
+        &request,
+        http,
+        config,
+        pending_callbacks,
+        bot_context,
+        bridge_stats,
+    )
+    .await;
 
     // Emit notifications BEFORE the response (avatar pattern)
     for notif in &notifications {
@@ -201,18 +229,17 @@ async fn dispatch(
     config: &Arc<DiscordConfig>,
     pending_callbacks: &PendingCallbacks,
     bot_context: &BotContext,
+    bridge_stats: &Arc<BridgeStats>,
 ) -> (JsonRpcResponse, Vec<JsonRpcNotification>) {
     match request.method.as_str() {
         "initialize" => (handle_initialize(request), vec![]),
         "tools/list" => (handle_tools_list(request), vec![]),
-        "tools/call" => handle_tools_call(request, http, config, bot_context).await,
+        "tools/call" => handle_tools_call(request, http, config, bot_context, bridge_stats).await,
         "mgp/callback/respond" => (
-            handle_callback_respond(request, http, config, pending_callbacks).await,
+            handle_callback_respond(request, http, config, pending_callbacks, bridge_stats).await,
             vec![],
         ),
-        "notifications/initialized" => {
-            (JsonRpcResponse::ok(request.id.clone(), json!({})), vec![])
-        }
+        "notifications/initialized" => (JsonRpcResponse::ok(request.id.clone(), json!({})), vec![]),
         _ => (
             JsonRpcResponse::err(
                 request.id.clone(),
@@ -256,6 +283,7 @@ async fn handle_tools_call(
     http: &Option<Arc<serenity::Http>>,
     config: &Arc<DiscordConfig>,
     bot_context: &BotContext,
+    bridge_stats: &Arc<BridgeStats>,
 ) -> (JsonRpcResponse, Vec<JsonRpcNotification>) {
     let Some(params) = &request.params else {
         return (
@@ -271,13 +299,51 @@ async fn handle_tools_call(
         );
     };
 
+    // bridge_status: handled locally (needs bridge_stats)
+    if tool_name == "bridge_status" {
+        let uptime = bridge_stats.start_time.elapsed().as_secs();
+        let connected_secs = bridge_stats
+            .connected_since
+            .lock()
+            .ok()
+            .and_then(|g| g.map(|t| t.elapsed().as_secs()));
+        let last_event_secs = bridge_stats
+            .last_event_at
+            .lock()
+            .ok()
+            .and_then(|g| g.map(|t| t.elapsed().as_secs()));
+        let result = json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string_pretty(&json!({
+                    "status": if connected_secs.is_some() { "connected" } else { "disconnected" },
+                    "uptime_seconds": uptime,
+                    "connected_seconds": connected_secs,
+                    "messages_received": bridge_stats.messages_received.load(std::sync::atomic::Ordering::Relaxed),
+                    "messages_sent": bridge_stats.messages_sent.load(std::sync::atomic::Ordering::Relaxed),
+                    "errors": bridge_stats.errors.load(std::sync::atomic::Ordering::Relaxed),
+                    "last_event_seconds_ago": last_event_secs,
+                })).unwrap_or_default()
+            }]
+        });
+        return (JsonRpcResponse::ok(request.id.clone(), result), vec![]);
+    }
+
     // set_presence doesn't require http
     if tool_name == "set_presence" {
         let args = params
             .get("arguments")
             .cloned()
             .unwrap_or(Value::Object(serde_json::Map::new()));
-        return match tools::execute(tool_name, &args, &Arc::new(serenity::Http::new("")), config, bot_context).await {
+        return match tools::execute(
+            tool_name,
+            &args,
+            &Arc::new(serenity::Http::new("")),
+            config,
+            bot_context,
+        )
+        .await
+        {
             Ok((result, notifications)) => (
                 JsonRpcResponse::ok(request.id.clone(), result),
                 notifications,
@@ -323,6 +389,7 @@ async fn handle_callback_respond(
     http: &Option<Arc<serenity::Http>>,
     config: &Arc<DiscordConfig>,
     pending_callbacks: &PendingCallbacks,
+    bridge_stats: &Arc<BridgeStats>,
 ) -> JsonRpcResponse {
     let params = match &request.params {
         Some(p) => p,
@@ -387,10 +454,12 @@ async fn handle_callback_respond(
 
     match tools::execute("send_message", &send_args, http, config, &dummy_ctx).await {
         Ok(_) => {
+            bridge_stats
+                .messages_sent
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Add completion reaction
             if channel_id > 0 && message_id > 0 {
-                let emoji =
-                    serenity::ReactionType::Unicode(config.reaction_done.clone());
+                let emoji = serenity::ReactionType::Unicode(config.reaction_done.clone());
                 let _ = http
                     .create_reaction(
                         serenity::ChannelId::new(channel_id),
@@ -421,10 +490,12 @@ async fn handle_callback_respond(
             )
         }
         Err(e) => {
+            bridge_stats
+                .errors
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Add error reaction
             if channel_id > 0 && message_id > 0 {
-                let emoji =
-                    serenity::ReactionType::Unicode(config.reaction_error.clone());
+                let emoji = serenity::ReactionType::Unicode(config.reaction_error.clone());
                 let _ = http
                     .create_reaction(
                         serenity::ChannelId::new(channel_id),
@@ -455,13 +526,133 @@ async fn handle_discord_event(
     http: &Option<Arc<serenity::Http>>,
     config: &Arc<DiscordConfig>,
     bot_user_id: &Arc<std::sync::atomic::AtomicU64>,
+    bridge_stats: &Arc<BridgeStats>,
 ) {
+    // Update last event timestamp
+    if let Ok(mut g) = bridge_stats.last_event_at.lock() {
+        *g = Some(std::time::Instant::now());
+    }
+
     match event {
         DiscordEvent::MessageCreate(msg) => {
-            let callback_id = format!("discord-{}", msg.message_id);
+            bridge_stats
+                .messages_received
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             let channel_id: u64 = msg.channel_id.parse().unwrap_or(0);
             let msg_id: u64 = msg.message_id.parse().unwrap_or(0);
+
+            // ── Direct tool execution (backtick commands) ──
+            let author_id: u64 = msg.author_id.parse().unwrap_or(0);
+            if config.direct_tool_users.contains(&author_id) {
+                let all_known: Vec<&str> = tools::BRIDGE_TOOL_NAMES
+                    .iter()
+                    .copied()
+                    .chain(config.direct_tool_ecosystem.iter().map(|s| s.as_str()))
+                    .collect();
+
+                if let Some((tool_name, args_map)) =
+                    utils::parse_direct_command(&msg.content, &all_known)
+                {
+                    // Add processing reaction
+                    if let Some(http) = http {
+                        if channel_id > 0 && msg_id > 0 {
+                            let emoji =
+                                serenity::ReactionType::Unicode(config.reaction_processing.clone());
+                            let _ = http
+                                .create_reaction(
+                                    serenity::ChannelId::new(channel_id),
+                                    serenity::MessageId::new(msg_id),
+                                    &emoji,
+                                )
+                                .await;
+                        }
+                    }
+
+                    if tools::BRIDGE_TOOL_NAMES.contains(&tool_name.as_str()) {
+                        // F1: Local execution for bridge-native tools
+                        if let Some(http) = http {
+                            let args_json: Value = args_map
+                                .iter()
+                                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                                .collect::<serde_json::Map<String, Value>>()
+                                .into();
+
+                            let dummy_ctx: BotContext = Arc::new(std::sync::Mutex::new(None));
+                            let (reaction, result_text) = match tools::execute(
+                                &tool_name, &args_json, http, config, &dummy_ctx,
+                            )
+                            .await
+                            {
+                                Ok((result, _)) => {
+                                    let text = result
+                                        .get("content")
+                                        .and_then(|c| c.as_array())
+                                        .and_then(|a| a.first())
+                                        .and_then(|e| e.get("text"))
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("(no result)")
+                                        .to_string();
+                                    (config.reaction_done.clone(), text)
+                                }
+                                Err(e) => {
+                                    bridge_stats
+                                        .errors
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    (config.reaction_error.clone(), format!("Error: {e}"))
+                                }
+                            };
+
+                            // Send result as reply
+                            let send_args = json!({
+                                "channel_id": msg.channel_id,
+                                "content": result_text,
+                                "reply_to": msg.message_id,
+                            });
+                            let dummy_ctx2: BotContext = Arc::new(std::sync::Mutex::new(None));
+                            let _ = tools::execute(
+                                "send_message",
+                                &send_args,
+                                http,
+                                config,
+                                &dummy_ctx2,
+                            )
+                            .await;
+                            bridge_stats
+                                .messages_sent
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                            // Swap processing → done/error reaction
+                            if channel_id > 0 && msg_id > 0 {
+                                let done_emoji = serenity::ReactionType::Unicode(reaction);
+                                let _ = http
+                                    .create_reaction(
+                                        serenity::ChannelId::new(channel_id),
+                                        serenity::MessageId::new(msg_id),
+                                        &done_emoji,
+                                    )
+                                    .await;
+                                let processing_emoji = serenity::ReactionType::Unicode(
+                                    config.reaction_processing.clone(),
+                                );
+                                let _ = http
+                                    .delete_reaction_me(
+                                        serenity::ChannelId::new(channel_id),
+                                        serenity::MessageId::new(msg_id),
+                                        &processing_emoji,
+                                    )
+                                    .await;
+                            }
+                        }
+                        return; // Skip normal callback flow
+                    }
+                    // F2: Ecosystem tool — fall through with tool_hint metadata
+                    // (handled below by injecting tool_hint into callback metadata)
+                }
+            }
+
+            // ── Normal callback flow ──
+            let callback_id = format!("discord-{}", msg.message_id);
 
             // Start typing indicator
             let typing = if let Some(http) = http {
@@ -475,11 +666,10 @@ async fn handle_discord_event(
                 None
             };
 
-            // Add processing reaction
+            // Add processing reaction (if not already added by direct tool path)
             if let Some(http) = http {
                 if channel_id > 0 && msg_id > 0 {
-                    let emoji =
-                        serenity::ReactionType::Unicode(config.reaction_processing.clone());
+                    let emoji = serenity::ReactionType::Unicode(config.reaction_processing.clone());
                     let _ = http
                         .create_reaction(
                             serenity::ChannelId::new(channel_id),
@@ -505,7 +695,6 @@ async fn handle_discord_event(
             }
 
             // Fetch recent channel history for short-term conversation context
-            // Reduce context for short messages to prevent history from dominating
             let effective_limit = if msg.content.len() < 20 {
                 config.context_history_limit.min(5)
             } else {
@@ -521,8 +710,7 @@ async fn handle_discord_event(
                             .limit(effective_limit);
                         match cid.messages(http, builder).await {
                             Ok(messages) => {
-                                let bot_id =
-                                    bot_user_id.load(std::sync::atomic::Ordering::Relaxed);
+                                let bot_id = bot_user_id.load(std::sync::atomic::Ordering::Relaxed);
                                 messages
                                     .iter()
                                     .rev()
@@ -581,6 +769,72 @@ async fn handle_discord_event(
                 );
             }
 
+            // Check for F2 ecosystem tool_hint (direct command that wasn't bridge-native)
+            let mut extra_metadata = serde_json::Map::new();
+            if config.direct_tool_users.contains(&author_id) {
+                let all_known: Vec<&str> = tools::BRIDGE_TOOL_NAMES
+                    .iter()
+                    .copied()
+                    .chain(config.direct_tool_ecosystem.iter().map(|s| s.as_str()))
+                    .collect();
+                if let Some((tool_name, args_map)) =
+                    utils::parse_direct_command(&msg.content, &all_known)
+                {
+                    extra_metadata.insert("tool_hint".into(), json!(tool_name));
+                    let tool_args: serde_json::Map<String, Value> = args_map
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect();
+                    extra_metadata.insert(
+                        "tool_args".into(),
+                        json!(serde_json::to_string(&tool_args).unwrap_or_default()),
+                    );
+                }
+            }
+
+            // Build callback metadata
+            let mut metadata = json!({
+                "source": "discord",
+                "author_id": msg.author_id,
+                "author_name": msg.author_name,
+                "author_roles": msg.author_roles,
+                "channel_id": msg.channel_id,
+                "guild_id": msg.guild_id,
+                "guild_name": msg.guild_name,
+                "message_id": msg.message_id,
+                "timestamp": msg.timestamp,
+                "is_thread": msg.thread_info.is_some(),
+                "attachments": msg.attachments.iter().map(|a| json!({
+                    "url": a.url,
+                    "filename": a.filename,
+                    "size": a.size,
+                    "content_type": a.content_type,
+                })).collect::<Vec<_>>(),
+                "reference": msg.reference.as_ref().map(|r| json!({
+                    "author_name": r.author_name,
+                    "content": r.content,
+                })),
+                "conversation_context": conversation_context,
+            });
+            // Add thread info
+            if let Some(ref ti) = msg.thread_info {
+                metadata.as_object_mut().unwrap().insert(
+                    "thread_info".into(),
+                    json!({
+                        "parent_channel_id": ti.parent_id,
+                        "thread_name": ti.thread_name,
+                        "archived": ti.archived,
+                    }),
+                );
+            }
+            // Add F2 tool_hint metadata
+            for (k, v) in &extra_metadata {
+                metadata
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(k.clone(), v.clone());
+            }
+
             // Emit callback request (MGP §13)
             let notif = JsonRpcNotification::new(
                 "notifications/mgp.callback.request",
@@ -588,32 +842,16 @@ async fn handle_discord_event(
                     "callback_id": callback_id,
                     "type": "external_message",
                     "message": message_content,
-                    "metadata": {
-                        "source": "discord",
-                        "author_id": msg.author_id,
-                        "author_name": msg.author_name,
-                        "channel_id": msg.channel_id,
-                        "guild_id": msg.guild_id,
-                        "message_id": msg.message_id,
-                        "timestamp": msg.timestamp,
-                        "attachments": msg.attachments.iter().map(|a| json!({
-                            "url": a.url,
-                            "filename": a.filename,
-                            "size": a.size,
-                            "content_type": a.content_type,
-                        })).collect::<Vec<_>>(),
-                        "reference": msg.reference.as_ref().map(|r| json!({
-                            "author_name": r.author_name,
-                            "content": r.content,
-                        })),
-                        "conversation_context": conversation_context,
-                    }
+                    "metadata": metadata,
                 })),
             );
             write_message(stdout, &notif);
         }
         DiscordEvent::Ready(data) => {
             bot_user_id.store(data.bot_user_id, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(mut g) = bridge_stats.connected_since.lock() {
+                *g = Some(std::time::Instant::now());
+            }
 
             let notif = JsonRpcNotification::new(
                 "notifications/mgp.lifecycle",
@@ -637,6 +875,19 @@ async fn handle_discord_event(
                     "previous_state": "reconnecting",
                     "new_state": "connected",
                     "reason": "Gateway session resumed",
+                })),
+            );
+            write_message(stdout, &notif);
+        }
+        DiscordEvent::ShardStageUpdate { old, new } => {
+            tracing::info!("Shard stage: {old} → {new}");
+            let notif = JsonRpcNotification::new(
+                "notifications/mgp.lifecycle",
+                Some(json!({
+                    "server_id": "io.discord",
+                    "previous_state": old,
+                    "new_state": new,
+                    "reason": "Shard stage update",
                 })),
             );
             write_message(stdout, &notif);
