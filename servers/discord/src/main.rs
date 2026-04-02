@@ -71,6 +71,9 @@ async fn main() {
     // Pending callbacks: maps callback_id → CallbackContext for response routing
     let pending_callbacks: PendingCallbacks = Arc::new(Mutex::new(HashMap::new()));
 
+    // Bot user ID (set on Ready event, used for conversation context role assignment)
+    let bot_user_id = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     // Discord event channel
     let (discord_tx, mut discord_rx) = mpsc::unbounded_channel::<DiscordEvent>();
 
@@ -136,7 +139,7 @@ async fn main() {
                 handle_stdin_line(&line, &stdout, &http, &config, &pending_callbacks).await;
             }
             Some(event) = discord_rx.recv() => {
-                handle_discord_event(event, &stdout, &pending_callbacks, &http).await;
+                handle_discord_event(event, &stdout, &pending_callbacks, &http, &config, &bot_user_id).await;
             }
             else => break,
         }
@@ -375,6 +378,8 @@ async fn handle_discord_event(
     stdout: &Arc<Mutex<io::Stdout>>,
     pending_callbacks: &PendingCallbacks,
     http: &Option<Arc<serenity::Http>>,
+    config: &Arc<DiscordConfig>,
+    bot_user_id: &Arc<std::sync::atomic::AtomicU64>,
 ) {
     match event {
         DiscordEvent::MessageCreate(msg) => {
@@ -406,6 +411,56 @@ async fn handle_discord_event(
                     },
                 );
             }
+
+            // Fetch recent channel history for short-term conversation context
+            let conversation_context = if config.context_history_limit > 0 {
+                if let Some(http) = http {
+                    let channel_id: u64 = msg.channel_id.parse().unwrap_or(0);
+                    let msg_id: u64 = msg.message_id.parse().unwrap_or(0);
+                    if channel_id > 0 && msg_id > 0 {
+                        let cid = serenity::ChannelId::new(channel_id);
+                        let mid = serenity::MessageId::new(msg_id);
+                        let builder = serenity::GetMessages::new()
+                            .before(mid)
+                            .limit(config.context_history_limit);
+                        match cid.messages(http, builder).await {
+                            Ok(messages) => {
+                                let bot_id =
+                                    bot_user_id.load(std::sync::atomic::Ordering::Relaxed);
+                                messages
+                                    .iter()
+                                    .rev() // oldest first
+                                    .filter(|m| !m.content.is_empty())
+                                    .map(|m| {
+                                        if m.author.id.get() == bot_id {
+                                            json!({
+                                                "role": "assistant",
+                                                "content": utils::truncate_str(&m.content, 500),
+                                            })
+                                        } else {
+                                            json!({
+                                                "role": "user",
+                                                "name": m.author.name,
+                                                "content": utils::truncate_str(&m.content, 500),
+                                            })
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to fetch channel history: {e}");
+                                vec![]
+                            }
+                        }
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
 
             // Build message content with image attachment info
             let mut message_content = msg.content.clone();
@@ -455,12 +510,15 @@ async fn handle_discord_event(
                             "author_name": r.author_name,
                             "content": r.content,
                         })),
+                        "conversation_context": conversation_context,
                     }
                 })),
             );
             write_message(stdout, &notif);
         }
         DiscordEvent::Ready(data) => {
+            bot_user_id.store(data.bot_user_id, std::sync::atomic::Ordering::Relaxed);
+
             let notif = JsonRpcNotification::new(
                 "notifications/mgp.lifecycle",
                 Some(json!({

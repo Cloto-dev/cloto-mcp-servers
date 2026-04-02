@@ -45,6 +45,19 @@ pub fn split_message(text: &str, limit: usize) -> Vec<String> {
     chunks
 }
 
+/// Truncate a string to at most `max_len` characters, appending "..." if truncated.
+pub fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    // Find a safe char boundary
+    let mut end = max_len.saturating_sub(3);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
 /// Strip @everyone and @here from a message.
 pub fn sanitize_mentions(text: &str) -> String {
     text.replace("@everyone", "@\u{200b}everyone")

@@ -12,6 +12,8 @@ pub struct DiscordConfig {
     pub allowed_guild_ids: Vec<u64>,
     /// Block @everyone and @here in outgoing messages.
     pub block_everyone: bool,
+    /// Number of recent messages to include as conversation context (0 = disabled).
+    pub context_history_limit: u8,
 }
 
 impl DiscordConfig {
@@ -28,11 +30,18 @@ impl DiscordConfig {
             .map(|v| v != "false" && v != "0")
             .unwrap_or(true);
 
+        let context_history_limit = env::var("DISCORD_CONTEXT_HISTORY_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(15)
+            .min(50);
+
         Self {
             bot_token,
             allowed_channel_ids,
             allowed_guild_ids,
             block_everyone,
+            context_history_limit,
         }
     }
 

@@ -47,6 +47,7 @@ pub struct ReferenceData {
 #[derive(Debug)]
 pub struct ReadyData {
     pub username: String,
+    pub bot_user_id: u64,
     pub guild_count: usize,
 }
 
@@ -123,6 +124,7 @@ impl serenity::EventHandler for DiscordHandler {
 
         let data = ReadyData {
             username: ready.user.name.clone(),
+            bot_user_id: ready.user.id.get(),
             guild_count: ready.guilds.len(),
         };
         let _ = self.event_tx.send(DiscordEvent::Ready(data));
