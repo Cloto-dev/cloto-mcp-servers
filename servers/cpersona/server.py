@@ -96,7 +96,7 @@ CALIBRATE_FLOOR = float(os.environ.get("CPERSONA_CALIBRATE_FLOOR", "0.05"))
 AUTOCUT_ENABLED = os.environ.get("CPERSONA_AUTOCUT_ENABLED", "false").lower() == "true"
 
 # Recall mode (v2.4)
-RECALL_MODE = os.environ.get("CPERSONA_RECALL_MODE", "cascade")  # cascade | rrf
+RECALL_MODE = os.environ.get("CPERSONA_RECALL_MODE", "rrf")  # rrf | cascade
 RRF_K = max(1, int(os.environ.get("CPERSONA_RRF_K", "60")))
 RRF_THRESHOLD_FACTOR = float(os.environ.get("CPERSONA_RRF_THRESHOLD_FACTOR", "0.5"))
 
