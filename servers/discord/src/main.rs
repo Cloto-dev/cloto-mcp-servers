@@ -765,8 +765,9 @@ async fn handle_discord_event(
                 vec![]
             };
 
-            // Build message content with image attachment info
-            let mut message_content = msg.content.clone();
+            // Prefix message with author name so the LLM clearly knows who is
+            // speaking, even when conversation_context contains other users' messages.
+            let mut message_content = format!("[{}] {}", msg.author_name, msg.content);
             let image_attachments: Vec<_> = msg
                 .attachments
                 .iter()
