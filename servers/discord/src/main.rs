@@ -37,6 +37,9 @@ struct CallbackContext {
     message_id: String,
     #[allow(dead_code)]
     author_name: String,
+    /// Whether the original message was a reply to a bot message.
+    /// If true, the response uses reply format; otherwise, a normal message.
+    is_reply: bool,
     /// Typing indicator guard — dropping this stops the typing indicator.
     _typing: Option<serenity::http::Typing>,
 }
@@ -442,12 +445,18 @@ async fn handle_callback_respond(
         return JsonRpcResponse::err(request.id.clone(), -32000, "Discord not connected");
     };
 
-    // Send as reply to the original message
-    let send_args = json!({
+    // Reply format only when the user replied to a bot message;
+    // mention-triggered messages get a normal (non-reply) response.
+    let mut send_args = json!({
         "channel_id": ctx.channel_id,
         "content": response,
-        "reply_to": ctx.message_id,
     });
+    if ctx.is_reply {
+        send_args
+            .as_object_mut()
+            .unwrap()
+            .insert("reply_to".into(), json!(ctx.message_id));
+    }
 
     // Dummy bot_context (not needed for send_message)
     let dummy_ctx: BotContext = Arc::new(std::sync::Mutex::new(None));
@@ -689,6 +698,7 @@ async fn handle_discord_event(
                         guild_id: msg.guild_id.clone(),
                         message_id: msg.message_id.clone(),
                         author_name: msg.author_name.clone(),
+                        is_reply: msg.reference.is_some(),
                         _typing: typing,
                     },
                 );
