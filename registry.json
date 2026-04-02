@@ -208,6 +208,7 @@
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
       "version": "2.4.2",
+      "changelog": "channel-based memory isolation (chat/discord), memory annotation separation, LLM dependency removal, get_profile tool",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [
@@ -302,6 +303,7 @@
       "description": "Bidirectional Discord communication — receive messages via MGP events, send via MCP tools",
       "category": "io",
       "version": "0.2.0",
+      "changelog": "Reply format, auto-reactions, embed for long messages, mention stripping, file sending, presence management, error reactions",
       "directory": "discord",
       "runtime": "rust",
       "bin_name": "mgp-discord",
