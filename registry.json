@@ -301,7 +301,7 @@
       "name": "Discord Bridge",
       "description": "Bidirectional Discord communication — receive messages via MGP events, send via MCP tools",
       "category": "io",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "directory": "discord",
       "runtime": "rust",
       "bin_name": "mgp-discord",
