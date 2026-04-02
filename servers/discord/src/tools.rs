@@ -4,6 +4,7 @@
 //! Follows avatar server pattern: execute() returns (result, notifications).
 
 use crate::protocol::{JsonRpcNotification, McpTool};
+use crate::rate_limiter::{RateLimiter, Route};
 use crate::utils;
 use serde_json::{json, Value};
 use serenity::all as serenity;
@@ -49,18 +50,19 @@ pub async fn execute(
     http: &Arc<serenity::Http>,
     config: &crate::config::DiscordConfig,
     bot_context: &Arc<std::sync::Mutex<Option<serenity::Context>>>,
+    rate_limiter: &Arc<RateLimiter>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     match tool_name {
-        "send_message" => execute_send_message(args, http, config).await,
-        "send_file" => execute_send_file(args, http).await,
-        "add_reaction" => execute_add_reaction(args, http).await,
+        "send_message" => execute_send_message(args, http, config, rate_limiter).await,
+        "send_file" => execute_send_file(args, http, rate_limiter).await,
+        "add_reaction" => execute_add_reaction(args, http, rate_limiter).await,
         "list_channels" => execute_list_channels(args, http, config).await,
         "list_threads" => execute_list_threads(args, http, config).await,
-        "create_thread" => execute_create_thread(args, http).await,
+        "create_thread" => execute_create_thread(args, http, rate_limiter).await,
         "get_history" => execute_get_history(args, http).await,
         "search_messages" => execute_search_messages(args, http).await,
-        "edit_message" => execute_edit_message(args, http, config).await,
-        "delete_message" => execute_delete_message(args, http).await,
+        "edit_message" => execute_edit_message(args, http, config, rate_limiter).await,
+        "delete_message" => execute_delete_message(args, http, rate_limiter).await,
         "set_presence" => execute_set_presence(args, bot_context).await,
         _ => Err(format!("Unknown tool: {tool_name}")),
     }
@@ -71,7 +73,7 @@ pub async fn execute(
 fn send_message_schema() -> McpTool {
     McpTool {
         name: "send_message".into(),
-        description: "Send a message to a Discord channel. Supports reply, embed for long messages, and auto-splitting.".into(),
+        description: "Send a message to a Discord channel. Supports reply, rich embeds, auto-splitting. Set embed=true for structured embed formatting with author/footer/fields.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -81,11 +83,44 @@ fn send_message_schema() -> McpTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Message content to send"
+                    "description": "Message content to send (used as embed description when embed=true)"
                 },
                 "reply_to": {
                     "type": "string",
                     "description": "Message ID to reply to (optional, sends as Discord Reply)"
+                },
+                "embed": {
+                    "type": "boolean",
+                    "description": "Force rich embed format (default: auto-detect based on length)"
+                },
+                "embed_title": {
+                    "type": "string",
+                    "description": "Embed title (optional, only used when embed=true or auto-embed)"
+                },
+                "embed_author": {
+                    "type": "string",
+                    "description": "Embed author name (optional)"
+                },
+                "embed_footer": {
+                    "type": "string",
+                    "description": "Embed footer text (optional)"
+                },
+                "embed_color": {
+                    "type": "string",
+                    "description": "Embed color as hex string e.g. '#FF5733' (optional, uses default)"
+                },
+                "embed_fields": {
+                    "type": "array",
+                    "description": "Embed fields array (optional)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "value": { "type": "string" },
+                            "inline": { "type": "boolean" }
+                        },
+                        "required": ["name", "value"]
+                    }
                 }
             },
             "required": ["channel_id", "content"]
@@ -323,6 +358,7 @@ async fn execute_send_message(
     args: &Value,
     http: &Arc<serenity::Http>,
     config: &crate::config::DiscordConfig,
+    rate_limiter: &Arc<RateLimiter>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     let channel_id = parse_id(args, "channel_id")?;
     let content = args
@@ -343,16 +379,61 @@ async fn execute_send_message(
     let channel = serenity::ChannelId::new(channel_id);
     let mut sent_ids = Vec::new();
 
-    // Use embed for long messages
-    if content.len() > config.embed_threshold {
+    let route = Route::ChannelMessage(channel_id);
+
+    // Rich embed options
+    let force_embed = args.get("embed").and_then(|v| v.as_bool()).unwrap_or(false);
+    let embed_title = args.get("embed_title").and_then(|v| v.as_str());
+    let embed_author = args.get("embed_author").and_then(|v| v.as_str());
+    let embed_footer = args.get("embed_footer").and_then(|v| v.as_str());
+    let embed_color_override = args
+        .get("embed_color")
+        .and_then(|v| v.as_str())
+        .and_then(|s| u32::from_str_radix(s.trim_start_matches('#'), 16).ok());
+    let embed_fields = args
+        .get("embed_fields")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let use_embed = force_embed || content.len() > config.embed_threshold;
+    let color = embed_color_override.unwrap_or(config.embed_color);
+
+    if use_embed {
         // Split into embed-sized chunks (4096 char limit per embed description)
         let chunks = utils::split_message(&content, 4096);
         for (i, chunk) in chunks.iter().enumerate() {
-            let embed = serenity::CreateEmbed::new()
+            let mut embed = serenity::CreateEmbed::new()
                 .description(chunk)
-                .color(config.embed_color);
+                .color(color);
+
+            // Apply rich formatting on first chunk only
+            if i == 0 {
+                if let Some(title) = embed_title {
+                    embed = embed.title(title);
+                }
+                if let Some(author) = embed_author {
+                    embed = embed.author(serenity::CreateEmbedAuthor::new(author));
+                }
+                // Add fields to first chunk
+                for field in &embed_fields {
+                    let name = field.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let value = field.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    let inline = field.get("inline").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if !name.is_empty() && !value.is_empty() {
+                        embed = embed.field(name, value, inline);
+                    }
+                }
+            }
+            // Footer on last chunk
+            if i == chunks.len() - 1 {
+                if let Some(footer) = embed_footer {
+                    embed = embed.footer(serenity::CreateEmbedFooter::new(footer));
+                }
+                embed = embed.timestamp(serenity::Timestamp::now());
+            }
+
             let mut msg_builder = serenity::CreateMessage::new().embed(embed);
-            // Reply on first chunk only
             if i == 0 {
                 if let Some(mid) = reply_to {
                     msg_builder = msg_builder.reference_message(serenity::MessageReference::from(
@@ -360,6 +441,7 @@ async fn execute_send_message(
                     ));
                 }
             }
+            rate_limiter.acquire(route.clone()).await;
             let msg = channel
                 .send_message(http, msg_builder)
                 .await
@@ -378,6 +460,7 @@ async fn execute_send_message(
                     ));
                 }
             }
+            rate_limiter.acquire(route.clone()).await;
             let msg = channel
                 .send_message(http, msg_builder)
                 .await
@@ -397,6 +480,7 @@ async fn execute_send_message(
 async fn execute_send_file(
     args: &Value,
     http: &Arc<serenity::Http>,
+    rate_limiter: &Arc<RateLimiter>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     let channel_id = parse_id(args, "channel_id")?;
     let file_path = args
@@ -420,6 +504,7 @@ async fn execute_send_file(
         msg_builder = msg_builder.content(text);
     }
 
+    rate_limiter.acquire(Route::ChannelMessage(channel_id)).await;
     let msg = channel
         .send_message(http, msg_builder)
         .await
@@ -431,6 +516,7 @@ async fn execute_send_file(
 async fn execute_add_reaction(
     args: &Value,
     http: &Arc<serenity::Http>,
+    rate_limiter: &Arc<RateLimiter>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     let channel_id = parse_id(args, "channel_id")?;
     let message_id = parse_id(args, "message_id")?;
@@ -443,6 +529,7 @@ async fn execute_add_reaction(
     let message = serenity::MessageId::new(message_id);
     let emoji = serenity::ReactionType::Unicode(emoji_str.to_string());
 
+    rate_limiter.acquire(Route::ChannelReaction(channel_id)).await;
     http.create_reaction(channel, message, &emoji)
         .await
         .map_err(|e| format!("Failed to add reaction: {e}"))?;
@@ -728,6 +815,7 @@ async fn execute_edit_message(
     args: &Value,
     http: &Arc<serenity::Http>,
     config: &crate::config::DiscordConfig,
+    rate_limiter: &Arc<RateLimiter>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     let channel_id = parse_id(args, "channel_id")?;
     let message_id = parse_id(args, "message_id")?;
@@ -746,6 +834,7 @@ async fn execute_edit_message(
     let message = serenity::MessageId::new(message_id);
     let edit = serenity::EditMessage::new().content(&content);
 
+    rate_limiter.acquire(Route::ChannelMessage(channel_id)).await;
     channel
         .edit_message(http, message, edit)
         .await
@@ -757,6 +846,7 @@ async fn execute_edit_message(
 async fn execute_delete_message(
     args: &Value,
     http: &Arc<serenity::Http>,
+    rate_limiter: &Arc<RateLimiter>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     let channel_id = parse_id(args, "channel_id")?;
     let message_id = parse_id(args, "message_id")?;
@@ -764,6 +854,7 @@ async fn execute_delete_message(
     let channel = serenity::ChannelId::new(channel_id);
     let message = serenity::MessageId::new(message_id);
 
+    rate_limiter.acquire(Route::ChannelMessage(channel_id)).await;
     channel
         .delete_message(http, message)
         .await
@@ -919,6 +1010,7 @@ fn create_thread_schema() -> McpTool {
 async fn execute_create_thread(
     args: &Value,
     http: &Arc<serenity::Http>,
+    rate_limiter: &Arc<RateLimiter>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     let channel_id = parse_id(args, "channel_id")?;
     let name = args
@@ -943,6 +1035,7 @@ async fn execute_create_thread(
 
     let cid = serenity::ChannelId::new(channel_id);
 
+    rate_limiter.acquire(Route::ChannelMessage(channel_id)).await;
     let thread = if let Some(mid) = message_id {
         let builder = serenity::CreateThread::new(name).auto_archive_duration(archive_duration);
         cid.create_thread_from_message(http, serenity::MessageId::new(mid), builder)

@@ -28,6 +28,12 @@ pub struct DiscordConfig {
     pub direct_tool_users: Vec<u64>,
     /// Ecosystem tool names available via backtick commands (routed via kernel tool_hint).
     pub direct_tool_ecosystem: Vec<String>,
+    /// Maximum number of messages in the queue (default: 5).
+    pub queue_max_size: usize,
+    /// Timeout in seconds for queued messages (default: 180 = 3 minutes).
+    pub queue_timeout_secs: u64,
+    /// Reaction emoji for queue waiting state.
+    pub reaction_queued: String,
 }
 
 impl DiscordConfig {
@@ -71,6 +77,18 @@ impl DiscordConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
+        let queue_max_size = env::var("DISCORD_QUEUE_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5)
+            .min(10);
+        let queue_timeout_secs = env::var("DISCORD_QUEUE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(180);
+        let reaction_queued =
+            env::var("DISCORD_REACTION_QUEUED").unwrap_or_else(|_| "⏳".into());
+
         Self {
             bot_token,
             allowed_channel_ids,
@@ -84,6 +102,9 @@ impl DiscordConfig {
             embed_threshold,
             direct_tool_users,
             direct_tool_ecosystem,
+            queue_max_size,
+            queue_timeout_secs,
+            reaction_queued,
         }
     }
 

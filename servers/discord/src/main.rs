@@ -16,12 +16,16 @@
 mod config;
 mod handler;
 mod protocol;
+mod queue;
+mod rate_limiter;
 mod tools;
 mod utils;
 
 use config::DiscordConfig;
 use handler::{DiscordEvent, DiscordHandler};
 use protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use queue::{EnqueueResult, MessageQueue, QueueEntry};
+use rate_limiter::RateLimiter;
 use serde_json::{json, Value};
 use serenity::all as serenity;
 use std::collections::HashMap;
@@ -46,6 +50,7 @@ struct CallbackContext {
 
 type PendingCallbacks = Arc<Mutex<HashMap<String, CallbackContext>>>;
 type BotContext = Arc<std::sync::Mutex<Option<serenity::Context>>>;
+type SharedQueue = Arc<Mutex<MessageQueue>>;
 
 /// Internal counters for bridge health monitoring.
 struct BridgeStats {
@@ -152,8 +157,23 @@ async fn main() {
                 }
 
                 tokio::spawn(async move {
-                    if let Err(e) = client.start().await {
-                        tracing::error!("Serenity client error: {e}");
+                    let mut backoff_secs = 1u64;
+                    const MAX_BACKOFF: u64 = 60;
+                    loop {
+                        match client.start().await {
+                            Ok(()) => {
+                                tracing::info!("Serenity client exited cleanly");
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Serenity client error (reconnecting in {backoff_secs}s): {e}"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs))
+                                    .await;
+                                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
+                            }
+                        }
                     }
                 });
                 Some(http_arc)
@@ -168,15 +188,32 @@ async fn main() {
     };
 
     let config = Arc::new(config);
+    let rate_limiter = Arc::new(RateLimiter::new());
+    let message_queue = Arc::new(Mutex::new(MessageQueue::with_config(
+        config.queue_max_size,
+        config.queue_timeout_secs,
+    )));
+
+    // Periodic intervals
+    let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(300));
+    cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut queue_timeout_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    queue_timeout_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Main loop: multiplex stdin JSON-RPC and Discord Gateway events
     loop {
         tokio::select! {
             Some(line) = stdin_rx.recv() => {
-                handle_stdin_line(&line, &stdout, &http, &config, &pending_callbacks, &bot_context, &bridge_stats).await;
+                handle_stdin_line(&line, &stdout, &http, &config, &pending_callbacks, &bot_context, &bridge_stats, &rate_limiter, &message_queue).await;
             }
             Some(event) = discord_rx.recv() => {
-                handle_discord_event(event, &stdout, &pending_callbacks, &http, &config, &bot_user_id, &bridge_stats).await;
+                handle_discord_event(event, &stdout, &pending_callbacks, &http, &config, &bot_user_id, &bridge_stats, &rate_limiter, &message_queue).await;
+            }
+            _ = cleanup_interval.tick() => {
+                rate_limiter.cleanup().await;
+            }
+            _ = queue_timeout_interval.tick() => {
+                handle_queue_timeouts(&message_queue, &http, &config, &rate_limiter).await;
             }
             else => break,
         }
@@ -185,6 +222,7 @@ async fn main() {
     tracing::info!("MGP Discord Server shutting down");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_stdin_line(
     line: &str,
     stdout: &Arc<Mutex<io::Stdout>>,
@@ -193,6 +231,8 @@ async fn handle_stdin_line(
     pending_callbacks: &PendingCallbacks,
     bot_context: &BotContext,
     bridge_stats: &Arc<BridgeStats>,
+    rate_limiter: &Arc<RateLimiter>,
+    message_queue: &SharedQueue,
 ) {
     let request: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -216,6 +256,9 @@ async fn handle_stdin_line(
         pending_callbacks,
         bot_context,
         bridge_stats,
+        rate_limiter,
+        message_queue,
+        stdout,
     )
     .await;
 
@@ -226,6 +269,7 @@ async fn handle_stdin_line(
     write_message(stdout, &response);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     request: &JsonRpcRequest,
     http: &Option<Arc<serenity::Http>>,
@@ -233,13 +277,28 @@ async fn dispatch(
     pending_callbacks: &PendingCallbacks,
     bot_context: &BotContext,
     bridge_stats: &Arc<BridgeStats>,
+    rate_limiter: &Arc<RateLimiter>,
+    message_queue: &SharedQueue,
+    stdout: &Arc<Mutex<io::Stdout>>,
 ) -> (JsonRpcResponse, Vec<JsonRpcNotification>) {
     match request.method.as_str() {
         "initialize" => (handle_initialize(request), vec![]),
         "tools/list" => (handle_tools_list(request), vec![]),
-        "tools/call" => handle_tools_call(request, http, config, bot_context, bridge_stats).await,
+        "tools/call" => {
+            handle_tools_call(request, http, config, bot_context, bridge_stats, rate_limiter).await
+        }
         "mgp/callback/respond" => (
-            handle_callback_respond(request, http, config, pending_callbacks, bridge_stats).await,
+            handle_callback_respond(
+                request,
+                http,
+                config,
+                pending_callbacks,
+                bridge_stats,
+                rate_limiter,
+                message_queue,
+                stdout,
+            )
+            .await,
             vec![],
         ),
         "notifications/initialized" => (JsonRpcResponse::ok(request.id.clone(), json!({})), vec![]),
@@ -287,6 +346,7 @@ async fn handle_tools_call(
     config: &Arc<DiscordConfig>,
     bot_context: &BotContext,
     bridge_stats: &Arc<BridgeStats>,
+    rate_limiter: &Arc<RateLimiter>,
 ) -> (JsonRpcResponse, Vec<JsonRpcNotification>) {
     let Some(params) = &request.params else {
         return (
@@ -344,6 +404,7 @@ async fn handle_tools_call(
             &Arc::new(serenity::Http::new("")),
             config,
             bot_context,
+            rate_limiter,
         )
         .await
         {
@@ -374,7 +435,7 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    match tools::execute(tool_name, &args, http, config, bot_context).await {
+    match tools::execute(tool_name, &args, http, config, bot_context, rate_limiter).await {
         Ok((result, notifications)) => (
             JsonRpcResponse::ok(request.id.clone(), result),
             notifications,
@@ -387,12 +448,16 @@ async fn handle_tools_call(
 }
 
 /// Handle mgp/callback/respond from the kernel — auto-send response to Discord.
+#[allow(clippy::too_many_arguments)]
 async fn handle_callback_respond(
     request: &JsonRpcRequest,
     http: &Option<Arc<serenity::Http>>,
     config: &Arc<DiscordConfig>,
     pending_callbacks: &PendingCallbacks,
     bridge_stats: &Arc<BridgeStats>,
+    rate_limiter: &Arc<RateLimiter>,
+    message_queue: &SharedQueue,
+    stdout: &Arc<Mutex<io::Stdout>>,
 ) -> JsonRpcResponse {
     let params = match &request.params {
         Some(p) => p,
@@ -450,6 +515,7 @@ async fn handle_callback_respond(
         );
     }
 
+    let http_opt = http; // Preserve original Option for queue processing
     let Some(http) = http else {
         return JsonRpcResponse::err(request.id.clone(), -32000, "Discord not connected");
     };
@@ -470,7 +536,7 @@ async fn handle_callback_respond(
     // Dummy bot_context (not needed for send_message)
     let dummy_ctx: BotContext = Arc::new(std::sync::Mutex::new(None));
 
-    match tools::execute("send_message", &send_args, http, config, &dummy_ctx).await {
+    let result = match tools::execute("send_message", &send_args, http, config, &dummy_ctx, rate_limiter).await {
         Ok(_) => {
             bridge_stats
                 .messages_sent
@@ -534,9 +600,15 @@ async fn handle_callback_respond(
                 format!("Discord send failed: {e}"),
             )
         }
-    }
+    };
+
+    // Dequeue next item and start processing
+    process_next_in_queue(message_queue, http_opt, config, pending_callbacks, rate_limiter, stdout).await;
+
+    result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_discord_event(
     event: DiscordEvent,
     stdout: &Arc<Mutex<io::Stdout>>,
@@ -545,6 +617,8 @@ async fn handle_discord_event(
     config: &Arc<DiscordConfig>,
     bot_user_id: &Arc<std::sync::atomic::AtomicU64>,
     bridge_stats: &Arc<BridgeStats>,
+    rate_limiter: &Arc<RateLimiter>,
+    message_queue: &SharedQueue,
 ) {
     // Update last event timestamp
     if let Ok(mut g) = bridge_stats.last_event_at.lock() {
@@ -598,7 +672,7 @@ async fn handle_discord_event(
 
                             let dummy_ctx: BotContext = Arc::new(std::sync::Mutex::new(None));
                             let (reaction, result_text) = match tools::execute(
-                                &tool_name, &args_json, http, config, &dummy_ctx,
+                                &tool_name, &args_json, http, config, &dummy_ctx, rate_limiter,
                             )
                             .await
                             {
@@ -634,6 +708,7 @@ async fn handle_discord_event(
                                 http,
                                 config,
                                 &dummy_ctx2,
+                                rate_limiter,
                             )
                             .await;
                             bridge_stats
@@ -669,203 +744,173 @@ async fn handle_discord_event(
                 }
             }
 
-            // ── Normal callback flow ──
+            // ── Normal callback flow (with queue) ──
             let callback_id = format!("discord-{}", msg.message_id);
 
-            // Start typing indicator
-            let typing = if let Some(http) = http {
-                if channel_id > 0 {
-                    let cid = serenity::ChannelId::new(channel_id);
-                    Some(cid.start_typing(http))
-                } else {
-                    None
-                }
-            } else {
-                None
+            // Build the notification payload (used immediately or stored in queue)
+            let notification_payload = build_callback_payload(
+                &callback_id,
+                &msg,
+                http,
+                config,
+                bot_user_id,
+                author_id,
+            )
+            .await;
+
+            // Try to enqueue
+            let enqueue_result = {
+                let entry = QueueEntry {
+                    callback_id: callback_id.clone(),
+                    channel_id: msg.channel_id.clone(),
+                    original_message_id: msg.message_id.clone(),
+                    waiting_message_id: None,
+                    guild_id: msg.guild_id.clone(),
+                    author_name: msg.author_name.clone(),
+                    author_id: msg.author_id.clone(),
+                    is_reply: msg.reference.is_some(),
+                    notification_payload,
+                    enqueued_at: std::time::Instant::now(),
+                };
+                message_queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .try_enqueue(entry)
             };
 
-            // Add processing reaction (if not already added by direct tool path)
-            if let Some(http) = http {
-                if channel_id > 0 && msg_id > 0 {
-                    let emoji = serenity::ReactionType::Unicode(config.reaction_processing.clone());
-                    let _ = http
-                        .create_reaction(
-                            serenity::ChannelId::new(channel_id),
-                            serenity::MessageId::new(msg_id),
-                            &emoji,
-                        )
-                        .await;
-                }
-            }
-
-            // Register pending callback context
-            if let Ok(mut cbs) = pending_callbacks.lock() {
-                cbs.insert(
-                    callback_id.clone(),
-                    CallbackContext {
-                        channel_id: msg.channel_id.clone(),
-                        guild_id: msg.guild_id.clone(),
-                        message_id: msg.message_id.clone(),
-                        author_name: msg.author_name.clone(),
-                        is_reply: msg.reference.is_some(),
-                        _typing: typing,
-                    },
-                );
-            }
-
-            // Fetch recent channel history for short-term conversation context
-            let effective_limit = if msg.content.len() < 20 {
-                config.context_history_limit.min(5)
-            } else {
-                config.context_history_limit
-            };
-            let conversation_context = if effective_limit > 0 {
-                if let Some(http) = http {
-                    if channel_id > 0 && msg_id > 0 {
-                        let cid = serenity::ChannelId::new(channel_id);
-                        let mid = serenity::MessageId::new(msg_id);
-                        let builder = serenity::GetMessages::new()
-                            .before(mid)
-                            .limit(effective_limit);
-                        match cid.messages(http, builder).await {
-                            Ok(messages) => {
-                                let bot_id = bot_user_id.load(std::sync::atomic::Ordering::Relaxed);
-                                messages
-                                    .iter()
-                                    .rev()
-                                    .filter(|m| !m.content.is_empty())
-                                    .map(|m| {
-                                        if m.author.id.get() == bot_id {
-                                            json!({
-                                                "role": "assistant",
-                                                "content": utils::truncate_str(&m.content, 500),
-                                            })
-                                        } else {
-                                            json!({
-                                                "role": "user",
-                                                "name": m.author.name,
-                                                "content": utils::truncate_str(&m.content, 500),
-                                            })
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to fetch channel history: {e}");
-                                vec![]
-                            }
+            match enqueue_result {
+                EnqueueResult::ProcessNow => {
+                    // Idle — process immediately
+                    let typing = if let Some(http) = http {
+                        if channel_id > 0 {
+                            Some(serenity::ChannelId::new(channel_id).start_typing(http))
+                        } else {
+                            None
                         }
                     } else {
-                        vec![]
+                        None
+                    };
+
+                    // Add processing reaction
+                    if let Some(http) = http {
+                        if channel_id > 0 && msg_id > 0 {
+                            let emoji = serenity::ReactionType::Unicode(
+                                config.reaction_processing.clone(),
+                            );
+                            let _ = http
+                                .create_reaction(
+                                    serenity::ChannelId::new(channel_id),
+                                    serenity::MessageId::new(msg_id),
+                                    &emoji,
+                                )
+                                .await;
+                        }
                     }
-                } else {
-                    vec![]
+
+                    // Register pending callback
+                    if let Ok(mut cbs) = pending_callbacks.lock() {
+                        cbs.insert(
+                            callback_id.clone(),
+                            CallbackContext {
+                                channel_id: msg.channel_id.clone(),
+                                guild_id: msg.guild_id.clone(),
+                                message_id: msg.message_id.clone(),
+                                author_name: msg.author_name.clone(),
+                                is_reply: msg.reference.is_some(),
+                                _typing: typing,
+                            },
+                        );
+                    }
+
+                    // Re-retrieve the payload from the queue to emit
+                    // (the entry was consumed by try_enqueue returning ProcessNow,
+                    //  so we rebuild it — the entry itself wasn't stored)
+                    let payload = build_callback_payload(
+                        &callback_id,
+                        &msg,
+                        http,
+                        config,
+                        bot_user_id,
+                        author_id,
+                    )
+                    .await;
+                    let notif = JsonRpcNotification::new(
+                        "notifications/mgp.callback.request",
+                        Some(payload),
+                    );
+                    write_message(stdout, &notif);
                 }
-            } else {
-                vec![]
-            };
+                EnqueueResult::Queued(position) => {
+                    // Busy — send waiting message and store in queue
+                    if let Some(http) = http {
+                        // Add queue reaction to original message
+                        if channel_id > 0 && msg_id > 0 {
+                            let emoji = serenity::ReactionType::Unicode(
+                                config.reaction_queued.clone(),
+                            );
+                            let _ = http
+                                .create_reaction(
+                                    serenity::ChannelId::new(channel_id),
+                                    serenity::MessageId::new(msg_id),
+                                    &emoji,
+                                )
+                                .await;
+                        }
 
-            // Prefix message with author name so the LLM clearly knows who is
-            // speaking, even when conversation_context contains other users' messages.
-            let mut message_content = format!("[{}] {}", msg.author_name, msg.content);
-            let image_attachments: Vec<_> = msg
-                .attachments
-                .iter()
-                .filter(|a| {
-                    a.content_type
-                        .as_deref()
-                        .is_some_and(|ct| ct.starts_with("image/"))
-                })
-                .collect();
-            if !image_attachments.is_empty() {
-                let image_lines: Vec<String> = image_attachments
-                    .iter()
-                    .map(|a| format!("- {} ({})", a.url, a.filename))
-                    .collect();
-                message_content = format!(
-                    "{}\n\n[Attached Images]\n{}",
-                    message_content,
-                    image_lines.join("\n")
-                );
-            }
-
-            // Check for F2 ecosystem tool_hint (direct command that wasn't bridge-native)
-            let mut extra_metadata = serde_json::Map::new();
-            if config.direct_tool_users.contains(&author_id) {
-                let all_known: Vec<&str> = tools::BRIDGE_TOOL_NAMES
-                    .iter()
-                    .copied()
-                    .chain(config.direct_tool_ecosystem.iter().map(|s| s.as_str()))
-                    .collect();
-                if let Some((tool_name, args_map)) =
-                    utils::parse_direct_command(&msg.content, &all_known)
-                {
-                    extra_metadata.insert("tool_hint".into(), json!(tool_name));
-                    let tool_args: serde_json::Map<String, Value> = args_map
-                        .iter()
-                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                        .collect();
-                    extra_metadata.insert(
-                        "tool_args".into(),
-                        json!(serde_json::to_string(&tool_args).unwrap_or_default()),
+                        // Send waiting indicator message
+                        let wait_text = format!(
+                            "⏳ 待機中です（{}番目）。順番が来たら応答します。",
+                            position
+                        );
+                        let cid = serenity::ChannelId::new(channel_id);
+                        let mut msg_builder = serenity::CreateMessage::new().content(&wait_text);
+                        if msg.reference.is_some() {
+                            msg_builder = msg_builder.reference_message(
+                                serenity::MessageReference::from((
+                                    cid,
+                                    serenity::MessageId::new(msg_id),
+                                )),
+                            );
+                        }
+                        rate_limiter
+                            .acquire(rate_limiter::Route::ChannelMessage(channel_id))
+                            .await;
+                        if let Ok(sent) = cid.send_message(http, msg_builder).await {
+                            // Update the queue entry with the waiting message ID
+                            if let Ok(mut q) = message_queue.lock() {
+                                for entry in q.waiting_iter_mut() {
+                                    if entry.callback_id == callback_id {
+                                        entry.waiting_message_id = Some(sent.id.to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        callback_id = %callback_id,
+                        position = position,
+                        "Message queued"
+                    );
+                }
+                EnqueueResult::Full => {
+                    // Queue full — notify user
+                    if let Some(http) = http {
+                        let full_text =
+                            "⚠️ 現在キューが満杯です。しばらく待ってからお試しください。";
+                        let cid = serenity::ChannelId::new(channel_id);
+                        let msg_builder = serenity::CreateMessage::new().content(full_text);
+                        rate_limiter
+                            .acquire(rate_limiter::Route::ChannelMessage(channel_id))
+                            .await;
+                        let _ = cid.send_message(http, msg_builder).await;
+                    }
+                    tracing::warn!(
+                        callback_id = %callback_id,
+                        "Queue full — message rejected"
                     );
                 }
             }
-
-            // Build callback metadata
-            let mut metadata = json!({
-                "source": "discord",
-                "author_id": msg.author_id,
-                "author_name": msg.author_name,
-                "author_roles": msg.author_roles,
-                "channel_id": msg.channel_id,
-                "guild_id": msg.guild_id,
-                "guild_name": msg.guild_name,
-                "message_id": msg.message_id,
-                "timestamp": msg.timestamp,
-                "is_thread": msg.thread_info.is_some(),
-                "attachments": msg.attachments.iter().map(|a| json!({
-                    "url": a.url,
-                    "filename": a.filename,
-                    "size": a.size,
-                    "content_type": a.content_type,
-                })).collect::<Vec<_>>(),
-                "reference": msg.reference.as_ref().map(|r| json!({
-                    "author_name": r.author_name,
-                    "content": r.content,
-                })),
-                "conversation_context": conversation_context,
-            });
-            // Add thread info
-            if let Some(ref ti) = msg.thread_info {
-                metadata.as_object_mut().unwrap().insert(
-                    "thread_info".into(),
-                    json!({
-                        "parent_channel_id": ti.parent_id,
-                        "thread_name": ti.thread_name,
-                        "archived": ti.archived,
-                    }),
-                );
-            }
-            // Add F2 tool_hint metadata
-            for (k, v) in &extra_metadata {
-                metadata
-                    .as_object_mut()
-                    .unwrap()
-                    .insert(k.clone(), v.clone());
-            }
-
-            // Emit callback request (MGP §13)
-            let notif = JsonRpcNotification::new(
-                "notifications/mgp.callback.request",
-                Some(json!({
-                    "callback_id": callback_id,
-                    "type": "external_message",
-                    "message": message_content,
-                    "metadata": metadata,
-                })),
-            );
-            write_message(stdout, &notif);
         }
         DiscordEvent::Ready(data) => {
             bot_user_id.store(data.bot_user_id, std::sync::atomic::Ordering::Relaxed);
@@ -911,6 +956,323 @@ async fn handle_discord_event(
                 })),
             );
             write_message(stdout, &notif);
+        }
+    }
+}
+
+/// Build the callback notification payload for a Discord message.
+async fn build_callback_payload(
+    callback_id: &str,
+    msg: &handler::MessageData,
+    http: &Option<Arc<serenity::Http>>,
+    config: &Arc<DiscordConfig>,
+    bot_user_id: &Arc<std::sync::atomic::AtomicU64>,
+    author_id: u64,
+) -> Value {
+    let channel_id: u64 = msg.channel_id.parse().unwrap_or(0);
+    let msg_id: u64 = msg.message_id.parse().unwrap_or(0);
+
+    // Fetch conversation context with speaker prioritization
+    let effective_limit = if msg.content.len() < 20 {
+        config.context_history_limit.min(5)
+    } else {
+        config.context_history_limit
+    };
+    let conversation_context = if effective_limit > 0 {
+        if let Some(http) = http {
+            if channel_id > 0 && msg_id > 0 {
+                let cid = serenity::ChannelId::new(channel_id);
+                let mid = serenity::MessageId::new(msg_id);
+                let fetch_limit = (effective_limit as u16 * 2).min(50) as u8;
+                let builder = serenity::GetMessages::new()
+                    .before(mid)
+                    .limit(fetch_limit);
+                match cid.messages(http, builder).await {
+                    Ok(messages) => {
+                        let bot_id = bot_user_id.load(std::sync::atomic::Ordering::Relaxed);
+                        let mut speaker_msgs = Vec::new();
+                        let mut other_msgs = Vec::new();
+
+                        for m in messages.iter().rev().filter(|m| !m.content.is_empty()) {
+                            let is_speaker = m.author.id.get() == author_id;
+                            let is_bot = m.author.id.get() == bot_id;
+                            let is_bot_reply_to_speaker = is_bot
+                                && m.referenced_message
+                                    .as_ref()
+                                    .is_some_and(|r| r.author.id.get() == author_id);
+
+                            let entry = if is_bot {
+                                json!({
+                                    "role": "assistant",
+                                    "content": utils::truncate_str(&m.content, 500),
+                                })
+                            } else {
+                                json!({
+                                    "role": "user",
+                                    "name": m.author.name,
+                                    "content": utils::truncate_str(&m.content, 500),
+                                })
+                            };
+
+                            if is_speaker || is_bot_reply_to_speaker {
+                                speaker_msgs.push(entry);
+                            } else {
+                                other_msgs.push(entry);
+                            }
+                        }
+
+                        let limit = effective_limit as usize;
+                        let mut context = Vec::with_capacity(limit);
+                        for entry in speaker_msgs.into_iter().take(limit) {
+                            context.push(entry);
+                        }
+                        let remaining = limit.saturating_sub(context.len());
+                        if remaining > 0 {
+                            let other_count = remaining.min(3);
+                            let skip = other_msgs.len().saturating_sub(other_count);
+                            for entry in other_msgs.into_iter().skip(skip) {
+                                context.push(entry);
+                            }
+                        }
+                        context
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch channel history: {e}");
+                        vec![]
+                    }
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
+    // Build message content with author prefix
+    let mut message_content = format!("[{}] {}", msg.author_name, msg.content);
+    let image_attachments: Vec<_> = msg
+        .attachments
+        .iter()
+        .filter(|a| {
+            a.content_type
+                .as_deref()
+                .is_some_and(|ct| ct.starts_with("image/"))
+        })
+        .collect();
+    if !image_attachments.is_empty() {
+        let image_lines: Vec<String> = image_attachments
+            .iter()
+            .map(|a| format!("- {} ({})", a.url, a.filename))
+            .collect();
+        message_content = format!(
+            "{}\n\n[Attached Images]\n{}",
+            message_content,
+            image_lines.join("\n")
+        );
+    }
+
+    // Build metadata
+    let mut metadata = json!({
+        "source": "discord",
+        "current_speaker": msg.author_name,
+        "author_id": msg.author_id,
+        "author_name": msg.author_name,
+        "author_roles": msg.author_roles,
+        "channel_id": msg.channel_id,
+        "guild_id": msg.guild_id,
+        "guild_name": msg.guild_name,
+        "message_id": msg.message_id,
+        "timestamp": msg.timestamp,
+        "is_thread": msg.thread_info.is_some(),
+        "attachments": msg.attachments.iter().map(|a| json!({
+            "url": a.url,
+            "filename": a.filename,
+            "size": a.size,
+            "content_type": a.content_type,
+        })).collect::<Vec<_>>(),
+        "reference": msg.reference.as_ref().map(|r| json!({
+            "author_name": r.author_name,
+            "content": r.content,
+        })),
+        "conversation_context": conversation_context,
+    });
+    if let Some(ref ti) = msg.thread_info {
+        metadata.as_object_mut().unwrap().insert(
+            "thread_info".into(),
+            json!({
+                "parent_channel_id": ti.parent_id,
+                "thread_name": ti.thread_name,
+                "archived": ti.archived,
+            }),
+        );
+    }
+
+    json!({
+        "callback_id": callback_id,
+        "type": "external_message",
+        "message": message_content,
+        "metadata": metadata,
+    })
+}
+
+/// Process the next item in the queue after a callback completes.
+async fn process_next_in_queue(
+    message_queue: &SharedQueue,
+    http: &Option<Arc<serenity::Http>>,
+    config: &Arc<DiscordConfig>,
+    pending_callbacks: &PendingCallbacks,
+    rate_limiter: &Arc<RateLimiter>,
+    stdout: &Arc<Mutex<io::Stdout>>,
+) {
+    let dequeue_result = message_queue
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .complete_active();
+
+    // Update position displays for remaining entries
+    if let Some(http) = http {
+        for (wait_msg_id, ch_id_str, new_pos) in &dequeue_result.position_updates {
+            let ch_id: u64 = ch_id_str.parse().unwrap_or(0);
+            let msg_id: u64 = wait_msg_id.parse().unwrap_or(0);
+            if ch_id > 0 && msg_id > 0 {
+                let new_text = format!(
+                    "⏳ 待機中です（{}番目）。順番が来たら応答します。",
+                    new_pos
+                );
+                let edit = serenity::EditMessage::new().content(&new_text);
+                rate_limiter
+                    .acquire(rate_limiter::Route::ChannelMessage(ch_id))
+                    .await;
+                let _ = serenity::ChannelId::new(ch_id)
+                    .edit_message(http, serenity::MessageId::new(msg_id), edit)
+                    .await;
+            }
+        }
+    }
+
+    // Process next entry if available
+    if let Some(next) = dequeue_result.next {
+        let channel_id: u64 = next.channel_id.parse().unwrap_or(0);
+        let original_msg_id: u64 = next.original_message_id.parse().unwrap_or(0);
+
+        // Edit waiting message to "processing" state
+        if let (Some(http), Some(wait_id)) = (http, &next.waiting_message_id) {
+            let wait_msg_id: u64 = wait_id.parse().unwrap_or(0);
+            if channel_id > 0 && wait_msg_id > 0 {
+                let edit = serenity::EditMessage::new().content("🔄 応答を生成中...");
+                rate_limiter
+                    .acquire(rate_limiter::Route::ChannelMessage(channel_id))
+                    .await;
+                let _ = serenity::ChannelId::new(channel_id)
+                    .edit_message(http, serenity::MessageId::new(wait_msg_id), edit)
+                    .await;
+            }
+        }
+
+        // Start typing
+        let typing = if let Some(http) = http {
+            if channel_id > 0 {
+                Some(serenity::ChannelId::new(channel_id).start_typing(http))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Add processing reaction to original message
+        if let Some(http) = http {
+            if channel_id > 0 && original_msg_id > 0 {
+                let emoji = serenity::ReactionType::Unicode(config.reaction_processing.clone());
+                let _ = http
+                    .create_reaction(
+                        serenity::ChannelId::new(channel_id),
+                        serenity::MessageId::new(original_msg_id),
+                        &emoji,
+                    )
+                    .await;
+                // Remove queue reaction
+                let queue_emoji = serenity::ReactionType::Unicode(config.reaction_queued.clone());
+                let _ = http
+                    .delete_reaction_me(
+                        serenity::ChannelId::new(channel_id),
+                        serenity::MessageId::new(original_msg_id),
+                        &queue_emoji,
+                    )
+                    .await;
+            }
+        }
+
+        // Register pending callback
+        if let Ok(mut cbs) = pending_callbacks.lock() {
+            cbs.insert(
+                next.callback_id.clone(),
+                CallbackContext {
+                    channel_id: next.channel_id.clone(),
+                    guild_id: next.guild_id.clone(),
+                    message_id: next.original_message_id.clone(),
+                    author_name: next.author_name.clone(),
+                    is_reply: next.is_reply,
+                    _typing: typing,
+                },
+            );
+        }
+
+        // Emit callback notification
+        let notif = JsonRpcNotification::new(
+            "notifications/mgp.callback.request",
+            Some(next.notification_payload),
+        );
+        write_message(stdout, &notif);
+
+        tracing::info!(
+            callback_id = %next.callback_id,
+            "Dequeued and started processing"
+        );
+    }
+}
+
+/// Handle timed-out queue entries — edit their waiting messages and remove them.
+async fn handle_queue_timeouts(
+    message_queue: &SharedQueue,
+    http: &Option<Arc<serenity::Http>>,
+    config: &Arc<DiscordConfig>,
+    rate_limiter: &Arc<RateLimiter>,
+) {
+    let expired = message_queue
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain_expired();
+
+    if expired.is_empty() {
+        return;
+    }
+
+    let _ = config; // suppress unused warning (may be used for timeout message customization)
+
+    if let Some(http) = http {
+        for entry in &expired {
+            if let Some(wait_id) = &entry.waiting_message_id {
+                let ch_id: u64 = entry.channel_id.parse().unwrap_or(0);
+                let wait_msg_id: u64 = wait_id.parse().unwrap_or(0);
+                if ch_id > 0 && wait_msg_id > 0 {
+                    let timeout_text = "⌛ タイムアウトしました。もう一度お試しください。";
+                    let edit = serenity::EditMessage::new().content(timeout_text);
+                    rate_limiter
+                        .acquire(rate_limiter::Route::ChannelMessage(ch_id))
+                        .await;
+                    let _ = serenity::ChannelId::new(ch_id)
+                        .edit_message(http, serenity::MessageId::new(wait_msg_id), edit)
+                        .await;
+                }
+            }
+            tracing::info!(
+                callback_id = %entry.callback_id,
+                "Queue entry timed out"
+            );
         }
     }
 }
