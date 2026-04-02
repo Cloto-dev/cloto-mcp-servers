@@ -70,11 +70,6 @@ VECTOR_MIN_SIMILARITY = float(os.environ.get("CPERSONA_VECTOR_MIN_SIMILARITY", "
 EMBEDDING_CACHE_SIZE = int(os.environ.get("CPERSONA_EMBEDDING_CACHE_SIZE", "256"))
 EMBEDDING_CACHE_TTL = int(os.environ.get("CPERSONA_EMBEDDING_CACHE_TTL", "300"))  # seconds
 
-# LLM proxy configuration (for Phase 3: memory extraction)
-LLM_PROXY_URL = os.environ.get("CPERSONA_LLM_PROXY_URL", "http://127.0.0.1:8082/v1/chat/completions")
-LLM_PROVIDER = os.environ.get("CPERSONA_LLM_PROVIDER", "cerebras")
-LLM_MODEL = os.environ.get("CPERSONA_LLM_MODEL", "gpt-oss-120b")
-
 # Background task queue (Phase 5: crash-recoverable async processing)
 TASK_QUEUE_ENABLED = os.environ.get("CPERSONA_TASK_QUEUE_ENABLED", "true").lower() == "true"
 
@@ -272,55 +267,6 @@ _embedding_client: EmbeddingClient | None = None
 # ============================================================
 # LLM Proxy (Phase 3: Memory Extraction)
 # ============================================================
-
-
-async def call_llm_proxy(prompt: str, system: str = "You are a memory extraction assistant.") -> str | None:
-    """Call the kernel LLM proxy for memory extraction tasks.
-
-    Returns the LLM response text, or None on failure (graceful degradation).
-    """
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                LLM_PROXY_URL,
-                json={
-                    "model": LLM_MODEL,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "stream": False,
-                },
-                headers={
-                    "X-LLM-Provider": LLM_PROVIDER,
-                    "Content-Type": "application/json",
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        logger.warning("LLM proxy call failed: %s", e)
-        return None
-
-
-def _format_history(history: list[dict]) -> str:
-    """Format conversation history into readable text for LLM prompts."""
-    lines = []
-    for msg in history:
-        content = msg.get("content", "")
-        if not content:
-            continue
-        source = msg.get("source", {})
-        if isinstance(source, str):
-            try:
-                source = json.loads(source)
-            except (json.JSONDecodeError, TypeError):
-                source = {}
-        if isinstance(source, dict) and ("User" in source or "user" in source):
-            lines.append(f"[User] {content}")
-        else:
-            lines.append(f"[Agent] {content}")
-    return "\n".join(lines)
 
 
 # ============================================================
@@ -1243,51 +1189,14 @@ async def do_get_profile(agent_id: str) -> dict:
     return {"profile": rows[0][0] if rows else ""}
 
 
-async def do_update_profile(agent_id: str, history: list[dict], profile: str = "") -> dict:
-    """Update agent profile. When `profile` is pre-computed, LLM is skipped."""
+async def do_update_profile(agent_id: str, profile: str = "") -> dict:
+    """Update agent profile with pre-computed content."""
     db = await get_db()
 
-    if profile:
-        # Pre-computed profile from kernel — save directly, no LLM needed
-        result = profile
-    elif history:
-        conversation = _format_history(history)
-        if not conversation.strip():
-            return {"ok": True, "profiles_updated": 0}
-
-        # Fetch existing profile
-        rows = await db.execute_fetchall(
-            "SELECT content FROM profiles WHERE agent_id = ? AND user_id = '' LIMIT 1",
-            (agent_id,),
-        )
-        existing = rows[0][0] if rows else ""
-
-        # LLM-driven fact extraction and merge (legacy fallback)
-        prompt = (
-            "Extract facts about the user from the following conversation.\n"
-            "Output a concise profile in bullet-point format.\n"
-            "MERGE with existing facts — keep all existing information unless explicitly contradicted.\n\n"
-            f"Existing profile:\n{existing or '(none)'}\n\n"
-            f"Conversation:\n{conversation}"
-        )
-        result = await call_llm_proxy(prompt)
-
-        if result is None:
-            # LLM unavailable — fallback to simple concatenation
-            user_lines = []
-            for msg in history:
-                source = msg.get("source", {})
-                if isinstance(source, str):
-                    source = _try_parse_json(source)
-                if isinstance(source, dict) and ("User" in source or "user" in source):
-                    content = msg.get("content", "")
-                    if content:
-                        user_lines.append(content)
-            if not user_lines:
-                return {"ok": True, "profiles_updated": 0}
-            result = "\n".join(user_lines[-10:])
-    else:
+    if not profile:
         return {"ok": True, "profiles_updated": 0}
+
+    result = profile
 
     await db.execute(
         """INSERT INTO profiles (agent_id, user_id, content, updated_at)
@@ -1308,105 +1217,17 @@ async def do_archive_episode(
     keywords: str = "",
     resolved: bool | None = None,
 ) -> dict:
-    """Summarize conversation via LLM and archive as episode with keywords + embedding.
+    """Archive a conversation episode with pre-computed summary, keywords, and resolved status.
 
-    When `summary` and/or `keywords` are pre-computed (e.g., by a Claude Code
-    sub-agent), the corresponding LLM proxy call is skipped. This enables
-    cost-efficient summarization via cheaper models (Sonnet/Haiku) in
-    environments without a kernel LLM proxy.
-
-    When `resolved` is None, the LLM classifies whether the topic was concluded.
+    All LLM processing (summarization, keyword extraction, resolved classification)
+    is performed by the caller (kernel via CFR engine, or Claude Code sub-agent).
+    CPersona stores the results without making any LLM calls.
     """
     db = await get_db()
 
-    if not history and not summary:
+    if not summary:
         return {"ok": True, "episode_id": None}
 
-    if not summary:
-        conversation = _format_history(history)
-        if not conversation.strip():
-            return {"ok": True, "episode_id": None}
-
-        # LLM-driven summarization
-        summary_prompt = (
-            "Summarize the following conversation concisely (800-1200 characters).\n"
-            "Preserve proper nouns, dates, decisions, and key technical details.\n\n"
-            f"{conversation}"
-        )
-        summary = await call_llm_proxy(summary_prompt)
-
-        if summary is None:
-            # LLM unavailable — fallback to simple concatenation
-            lines = []
-            for msg in history:
-                content = msg.get("content", "")
-                if content:
-                    source = msg.get("source", {})
-                    if isinstance(source, str):
-                        source = _try_parse_json(source)
-                    speaker = "User" if isinstance(source, dict) and ("User" in source or "user" in source) else "Agent"
-                    lines.append(f"[{speaker}] {content}")
-            if len(lines) <= 5:
-                summary = "\n".join(lines)
-            else:
-                summary = "\n".join(lines[:2] + [f"... ({len(lines) - 4} messages) ..."] + lines[-2:])
-
-    if not keywords:
-        # LLM-driven keyword extraction
-        keyword_prompt = (
-            "Extract 5-10 search keywords from the following summary.\n"
-            "Choose words suitable for full-text search (FTS5). Output space-separated keywords only.\n\n"
-            f"{summary}"
-        )
-        keywords_result = await call_llm_proxy(keyword_prompt)
-
-        if keywords_result is None:
-            # Fallback: word frequency
-            word_freq: dict[str, int] = {}
-            for msg in history:
-                for word in re.findall(r"\b\w{3,}\b", msg.get("content", "").lower()):
-                    word_freq[word] = word_freq.get(word, 0) + 1
-            stopwords = {
-                "the",
-                "and",
-                "for",
-                "that",
-                "this",
-                "with",
-                "are",
-                "was",
-                "has",
-                "have",
-                "not",
-                "but",
-                "you",
-                "your",
-                "can",
-                "will",
-                "from",
-                "they",
-                "been",
-                "more",
-            }
-            sorted_words = sorted(
-                ((w, c) for w, c in word_freq.items() if w not in stopwords),
-                key=lambda x: x[1],
-                reverse=True,
-            )
-            keywords = " ".join(w for w, _ in sorted_words[:10])
-        else:
-            keywords = keywords_result.strip()
-
-    # v2.3.3: Resolved classification
-    if resolved is None and summary:
-        resolved_prompt = (
-            "Based on the following conversation summary, determine if the main task "
-            "or discussion was completed, resolved, or concluded.\n"
-            "Output ONLY 'true' or 'false'.\n\n"
-            f"{summary}"
-        )
-        resolved_result = await call_llm_proxy(resolved_prompt)
-        resolved = resolved_result is not None and resolved_result.strip().lower() == "true"
     resolved = bool(resolved)
 
     # Timestamps
@@ -2224,15 +2045,9 @@ registry.auto_tool(
 )
 
 
-async def do_update_profile_or_queue(agent_id: str, history: list, profile: str = "") -> dict:
-    """Enqueue profile update if task queue is enabled, otherwise run synchronously."""
-    if profile:
-        # Pre-computed profile — save directly, skip queue
-        return await do_update_profile(agent_id, history, profile=profile)
-    if _task_queue and TASK_QUEUE_ENABLED:
-        task_id = await _task_queue.enqueue("update_profile", agent_id, history)
-        return {"ok": True, "queued": True, "task_id": task_id}
-    return await do_update_profile(agent_id, history)
+async def do_update_profile_or_queue(agent_id: str, profile: str = "") -> dict:
+    """Save pre-computed profile. Queue is bypassed since no LLM processing is needed."""
+    return await do_update_profile(agent_id, profile=profile)
 
 
 async def do_archive_episode_or_queue(
@@ -2276,58 +2091,50 @@ registry.auto_tool(
 
 registry.auto_tool(
     "update_profile",
-    "Update agent profile. When profile is pre-computed by the kernel, LLM is skipped.",
+    "Save a pre-computed agent profile to the database.",
     {
         "type": "object",
         "properties": {
             "agent_id": {"type": "string", "description": "Agent identifier"},
-            "history": {
-                "type": "array",
-                "description": "Recent conversation messages (used for LLM extraction when profile is not pre-computed)",
-                "items": {"type": "object"},
-            },
             "profile": {
                 "type": "string",
-                "description": "Pre-computed profile text (skips internal LLM when provided)",
+                "description": "Profile text to save (pre-computed by caller)",
             },
         },
-        "required": ["agent_id"],
+        "required": ["agent_id", "profile"],
     },
     do_update_profile_or_queue,
-    [("agent_id", str), ("history", list, []), ("profile", str, "")],
+    [("agent_id", str), ("profile", str, "")],
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
 )
 
 registry.auto_tool(
     "archive_episode",
-    "Summarize and archive a conversation episode for searchable recall. "
-    "When summary/keywords are provided, LLM summarization is skipped (use for pre-computed summaries from sub-agents). "
-    "Resolved status is auto-classified by LLM unless explicitly provided.",
+    "Archive a conversation episode with pre-computed summary, keywords, and resolved status. "
+    "All LLM processing is performed by the caller.",
     {
         "type": "object",
         "properties": {
             "agent_id": {"type": "string", "description": "Agent identifier"},
             "history": {
                 "type": "array",
-                "description": "Conversation messages to archive (can be empty if summary is pre-computed)",
+                "description": "Original conversation messages (used for timestamp extraction and embedding)",
                 "items": {"type": "object"},
             },
             "summary": {
                 "type": "string",
-                "description": "Pre-computed summary (skips LLM summarization when provided)",
-                "default": "",
+                "description": "Episode summary (pre-computed by caller)",
             },
             "keywords": {
                 "type": "string",
-                "description": "Pre-computed space-separated keywords (skips LLM extraction when provided)",
-                "default": "",
+                "description": "Space-separated keywords (pre-computed by caller)",
             },
             "resolved": {
                 "type": "boolean",
-                "description": "Pre-computed resolution status — true if the topic was completed/concluded (skips LLM classification when provided)",
+                "description": "Whether the topic was completed/concluded",
             },
         },
-        "required": ["agent_id"],
+        "required": ["agent_id", "summary"],
     },
     do_archive_episode_or_queue,
     [("agent_id", str), ("history", list, []), ("summary", str, ""), ("keywords", str, ""), ("resolved", bool, None)],
