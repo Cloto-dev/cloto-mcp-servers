@@ -1233,48 +1233,61 @@ async def _search_memories_keyword(
     return [{"id": r[0], "msg_id": r[1], "content": r[2], "source": r[3], "timestamp": r[4]} for r in rows[:limit]]
 
 
-async def do_update_profile(agent_id: str, history: list[dict]) -> dict:
-    """Extract user facts from conversation via LLM and merge into profile."""
+async def do_get_profile(agent_id: str) -> dict:
+    """Get the current profile for an agent."""
     db = await get_db()
-
-    if not history:
-        return {"ok": True, "profiles_updated": 0}
-
-    conversation = _format_history(history)
-    if not conversation.strip():
-        return {"ok": True, "profiles_updated": 0}
-
-    # Fetch existing profile
     rows = await db.execute_fetchall(
         "SELECT content FROM profiles WHERE agent_id = ? AND user_id = '' LIMIT 1",
         (agent_id,),
     )
-    existing = rows[0][0] if rows else ""
+    return {"profile": rows[0][0] if rows else ""}
 
-    # LLM-driven fact extraction and merge
-    prompt = (
-        "Extract facts about the user from the following conversation.\n"
-        "Output a concise profile in bullet-point format.\n"
-        "MERGE with existing facts — keep all existing information unless explicitly contradicted.\n\n"
-        f"Existing profile:\n{existing or '(none)'}\n\n"
-        f"Conversation:\n{conversation}"
-    )
-    result = await call_llm_proxy(prompt)
 
-    if result is None:
-        # LLM unavailable — fallback to simple concatenation
-        user_lines = []
-        for msg in history:
-            source = msg.get("source", {})
-            if isinstance(source, str):
-                source = _try_parse_json(source)
-            if isinstance(source, dict) and ("User" in source or "user" in source):
-                content = msg.get("content", "")
-                if content:
-                    user_lines.append(content)
-        if not user_lines:
+async def do_update_profile(agent_id: str, history: list[dict], profile: str = "") -> dict:
+    """Update agent profile. When `profile` is pre-computed, LLM is skipped."""
+    db = await get_db()
+
+    if profile:
+        # Pre-computed profile from kernel — save directly, no LLM needed
+        result = profile
+    elif history:
+        conversation = _format_history(history)
+        if not conversation.strip():
             return {"ok": True, "profiles_updated": 0}
-        result = "\n".join(user_lines[-10:])
+
+        # Fetch existing profile
+        rows = await db.execute_fetchall(
+            "SELECT content FROM profiles WHERE agent_id = ? AND user_id = '' LIMIT 1",
+            (agent_id,),
+        )
+        existing = rows[0][0] if rows else ""
+
+        # LLM-driven fact extraction and merge (legacy fallback)
+        prompt = (
+            "Extract facts about the user from the following conversation.\n"
+            "Output a concise profile in bullet-point format.\n"
+            "MERGE with existing facts — keep all existing information unless explicitly contradicted.\n\n"
+            f"Existing profile:\n{existing or '(none)'}\n\n"
+            f"Conversation:\n{conversation}"
+        )
+        result = await call_llm_proxy(prompt)
+
+        if result is None:
+            # LLM unavailable — fallback to simple concatenation
+            user_lines = []
+            for msg in history:
+                source = msg.get("source", {})
+                if isinstance(source, str):
+                    source = _try_parse_json(source)
+                if isinstance(source, dict) and ("User" in source or "user" in source):
+                    content = msg.get("content", "")
+                    if content:
+                        user_lines.append(content)
+            if not user_lines:
+                return {"ok": True, "profiles_updated": 0}
+            result = "\n".join(user_lines[-10:])
+    else:
+        return {"ok": True, "profiles_updated": 0}
 
     await db.execute(
         """INSERT INTO profiles (agent_id, user_id, content, updated_at)
@@ -2211,8 +2224,11 @@ registry.auto_tool(
 )
 
 
-async def do_update_profile_or_queue(agent_id: str, history: list) -> dict:
+async def do_update_profile_or_queue(agent_id: str, history: list, profile: str = "") -> dict:
     """Enqueue profile update if task queue is enabled, otherwise run synchronously."""
+    if profile:
+        # Pre-computed profile — save directly, skip queue
+        return await do_update_profile(agent_id, history, profile=profile)
     if _task_queue and TASK_QUEUE_ENABLED:
         task_id = await _task_queue.enqueue("update_profile", agent_id, history)
         return {"ok": True, "queued": True, "task_id": task_id}
@@ -2244,18 +2260,41 @@ async def do_get_queue_status() -> dict:
 
 
 registry.auto_tool(
-    "update_profile",
-    "Extract user facts from conversation and merge with existing profile.",
+    "get_profile",
+    "Get the current profile for an agent.",
     {
         "type": "object",
         "properties": {
             "agent_id": {"type": "string", "description": "Agent identifier"},
-            "history": {"type": "array", "description": "Recent conversation messages", "items": {"type": "object"}},
         },
-        "required": ["agent_id", "history"],
+        "required": ["agent_id"],
+    },
+    do_get_profile,
+    [("agent_id", str)],
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+
+registry.auto_tool(
+    "update_profile",
+    "Update agent profile. When profile is pre-computed by the kernel, LLM is skipped.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent identifier"},
+            "history": {
+                "type": "array",
+                "description": "Recent conversation messages (used for LLM extraction when profile is not pre-computed)",
+                "items": {"type": "object"},
+            },
+            "profile": {
+                "type": "string",
+                "description": "Pre-computed profile text (skips internal LLM when provided)",
+            },
+        },
+        "required": ["agent_id"],
     },
     do_update_profile_or_queue,
-    [("agent_id", str), ("history", list)],
+    [("agent_id", str), ("history", list, []), ("profile", str, "")],
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
 )
 
