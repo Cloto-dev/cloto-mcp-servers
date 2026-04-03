@@ -157,12 +157,10 @@ impl serenity::EventHandler for DiscordHandler {
             && !msg.content.trim().starts_with("```")
             && msg.content.trim().ends_with('`');
 
-        // Webhook/bot messages bypass mention requirement — always forwarded
-        let is_webhook_or_bot = msg.author.bot || msg.webhook_id.is_some();
-
-        if !is_direct_command && !is_webhook_or_bot {
+        // All messages (including webhooks/bots) must mention or reply to the bot.
+        // This prevents runaway loops when other bots post in the channel.
+        if !is_direct_command {
             let mentions_bot = msg.mentions_user_id(bot_id);
-            // Also respond when the user replies to a bot message (no @mention needed)
             let is_reply_to_bot = msg
                 .referenced_message
                 .as_ref()

@@ -1,4 +1,4 @@
-//! MGP Discord Server v0.4.1 -- Bidirectional Discord communication.
+//! MGP Discord Server v0.4.2 -- Bidirectional Discord communication.
 //!
 //! Runs as a single process using stdio JSON-RPC transport + Discord Gateway.
 //! Server ID: `io.discord`
@@ -51,7 +51,7 @@ async fn main() {
         )
         .init();
 
-    tracing::info!("MGP Discord Server v0.4.1 starting");
+    tracing::info!("MGP Discord Server v0.4.2 starting");
 
     let bridge_stats = Arc::new(BridgeStats {
         connected_since: std::sync::Mutex::new(None),
@@ -550,22 +550,6 @@ async fn handle_discord_event(ctx: &BridgeContext, event: DiscordEvent) {
                     // F2: Ecosystem tool -- fall through with tool_hint metadata
                     // (handled below by injecting tool_hint into callback metadata)
                 }
-            }
-
-            // -- Webhook/bot queue bypass (#10) --
-            // Webhook and bot messages skip the queue entirely; emit notification directly.
-            if msg.is_webhook || msg.author_bot {
-                let session_id = format!("{}:{}", msg.channel_id, msg.author_id);
-                let callback_id = format!(
-                    "discord-{}-{}-{}",
-                    msg.channel_id, msg.author_id, msg.message_id
-                );
-                let payload =
-                    build_callback_payload(ctx, &callback_id, &session_id, &msg, author_id).await;
-                let notif =
-                    JsonRpcNotification::new("notifications/mgp.callback.request", Some(payload));
-                write_message(&ctx.stdout, &notif);
-                return;
             }
 
             // -- Normal callback flow (with queue) --
