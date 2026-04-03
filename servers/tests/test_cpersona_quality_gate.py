@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, "cpersona")
 
-from server import _adaptive_min_score, _apply_quality_gate  # noqa: E402
+from server import _adaptive_min_score, _apply_quality_gate  # noqa: E402, I001
 
 
 # ── _adaptive_min_score ──
