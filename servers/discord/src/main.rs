@@ -1,4 +1,4 @@
-//! MGP Discord Server v0.4.2 -- Bidirectional Discord communication.
+//! MGP Discord Server v0.4.3 -- Bidirectional Discord communication.
 //!
 //! Runs as a single process using stdio JSON-RPC transport + Discord Gateway.
 //! Server ID: `io.discord`
@@ -51,7 +51,7 @@ async fn main() {
         )
         .init();
 
-    tracing::info!("MGP Discord Server v0.4.2 starting");
+    tracing::info!("MGP Discord Server v0.4.3 starting");
 
     let bridge_stats = Arc::new(BridgeStats {
         connected_since: std::sync::Mutex::new(None),

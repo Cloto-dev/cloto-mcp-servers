@@ -53,7 +53,7 @@ impl DiscordConfig {
         let context_history_limit = env::var("DISCORD_CONTEXT_HISTORY_LIMIT")
             .ok()
             .and_then(|v| v.parse::<u8>().ok())
-            .unwrap_or(15)
+            .unwrap_or(0)
             .min(50);
 
         let reaction_processing =
