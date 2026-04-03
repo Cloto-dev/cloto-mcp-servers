@@ -279,7 +279,15 @@ async fn handle_stdin_line(
     if request.id.is_none() {
         // Handle streaming chunks
         if request.method == "notifications/mgp.stream.chunk" {
-            handle_stream_chunk(&request, http, pending_callbacks, streaming_states, rate_limiter, config).await;
+            handle_stream_chunk(
+                &request,
+                http,
+                pending_callbacks,
+                streaming_states,
+                rate_limiter,
+                config,
+            )
+            .await;
         } else {
             tracing::debug!("Received notification: {}", request.method);
         }
@@ -324,7 +332,15 @@ async fn dispatch(
         "initialize" => (handle_initialize(request), vec![]),
         "tools/list" => (handle_tools_list(request), vec![]),
         "tools/call" => {
-            handle_tools_call(request, http, config, bot_context, bridge_stats, rate_limiter).await
+            handle_tools_call(
+                request,
+                http,
+                config,
+                bot_context,
+                bridge_stats,
+                rate_limiter,
+            )
+            .await
         }
         "mgp/callback/respond" => (
             handle_callback_respond(
@@ -619,7 +635,15 @@ async fn handle_callback_respond(
             request.id.clone(),
             json!({"status": "sent", "callback_id": callback_id, "mode": "stream_finalized"}),
         );
-        process_next_in_queue(message_queue, http_opt, config, pending_callbacks, rate_limiter, stdout).await;
+        process_next_in_queue(
+            message_queue,
+            http_opt,
+            config,
+            pending_callbacks,
+            rate_limiter,
+            stdout,
+        )
+        .await;
         return result;
     }
 
@@ -627,7 +651,10 @@ async fn handle_callback_respond(
         ResponseMode::Interaction { token } => {
             // Edit the deferred interaction response
             let edit = serenity::EditInteractionResponse::new().content(response);
-            match http.edit_original_interaction_response(&token, &edit, vec![]).await {
+            match http
+                .edit_original_interaction_response(&token, &edit, vec![])
+                .await
+            {
                 Ok(_) => {
                     bridge_stats
                         .messages_sent
@@ -668,7 +695,16 @@ async fn handle_callback_respond(
             }
 
             let dummy_ctx: BotContext = Arc::new(std::sync::Mutex::new(None));
-            match tools::execute("send_message", &send_args, http, config, &dummy_ctx, rate_limiter).await {
+            match tools::execute(
+                "send_message",
+                &send_args,
+                http,
+                config,
+                &dummy_ctx,
+                rate_limiter,
+            )
+            .await
+            {
                 Ok(_) => {
                     bridge_stats
                         .messages_sent
@@ -729,7 +765,15 @@ async fn handle_callback_respond(
     };
 
     // Dequeue next item and start processing
-    process_next_in_queue(message_queue, http_opt, config, pending_callbacks, rate_limiter, stdout).await;
+    process_next_in_queue(
+        message_queue,
+        http_opt,
+        config,
+        pending_callbacks,
+        rate_limiter,
+        stdout,
+    )
+    .await;
 
     result
 }
@@ -798,7 +842,12 @@ async fn handle_discord_event(
 
                             let dummy_ctx: BotContext = Arc::new(std::sync::Mutex::new(None));
                             let (reaction, result_text) = match tools::execute(
-                                &tool_name, &args_json, http, config, &dummy_ctx, rate_limiter,
+                                &tool_name,
+                                &args_json,
+                                http,
+                                config,
+                                &dummy_ctx,
+                                rate_limiter,
                             )
                             .await
                             {
@@ -935,9 +984,8 @@ async fn handle_discord_event(
                     // Add processing reaction
                     if let Some(http) = http {
                         if channel_id > 0 && msg_id > 0 {
-                            let emoji = serenity::ReactionType::Unicode(
-                                config.reaction_processing.clone(),
-                            );
+                            let emoji =
+                                serenity::ReactionType::Unicode(config.reaction_processing.clone());
                             let _ = http
                                 .create_reaction(
                                     serenity::ChannelId::new(channel_id),
@@ -989,9 +1037,8 @@ async fn handle_discord_event(
                     if let Some(http) = http {
                         // Add queue reaction to original message
                         if channel_id > 0 && msg_id > 0 {
-                            let emoji = serenity::ReactionType::Unicode(
-                                config.reaction_queued.clone(),
-                            );
+                            let emoji =
+                                serenity::ReactionType::Unicode(config.reaction_queued.clone());
                             let _ = http
                                 .create_reaction(
                                     serenity::ChannelId::new(channel_id),
@@ -1009,12 +1056,11 @@ async fn handle_discord_event(
                         let cid = serenity::ChannelId::new(channel_id);
                         let mut msg_builder = serenity::CreateMessage::new().content(&wait_text);
                         if msg.reference.is_some() {
-                            msg_builder = msg_builder.reference_message(
-                                serenity::MessageReference::from((
+                            msg_builder =
+                                msg_builder.reference_message(serenity::MessageReference::from((
                                     cid,
                                     serenity::MessageId::new(msg_id),
-                                )),
-                            );
+                                )));
                         }
                         rate_limiter
                             .acquire(rate_limiter::Route::ChannelMessage(channel_id))
@@ -1081,7 +1127,11 @@ async fn handle_discord_event(
                 if let Some(http) = http {
                     let edit = serenity::EditInteractionResponse::new().content(&status_text);
                     let _ = http
-                        .edit_original_interaction_response(&interaction.interaction_token, &edit, vec![])
+                        .edit_original_interaction_response(
+                            &interaction.interaction_token,
+                            &edit,
+                            vec![],
+                        )
                         .await;
                 }
                 return;
@@ -1093,7 +1143,11 @@ async fn handle_discord_event(
                     let edit = serenity::EditInteractionResponse::new()
                         .content("メッセージを入力してください。");
                     let _ = http
-                        .edit_original_interaction_response(&interaction.interaction_token, &edit, vec![])
+                        .edit_original_interaction_response(
+                            &interaction.interaction_token,
+                            &edit,
+                            vec![],
+                        )
                         .await;
                 }
                 return;
@@ -1451,9 +1505,7 @@ async fn build_callback_payload(
                 } else {
                     (effective_limit as u16 * 3).min(50) as u8 // Over-fetch for strict filter
                 };
-                let builder = serenity::GetMessages::new()
-                    .before(mid)
-                    .limit(fetch_limit);
+                let builder = serenity::GetMessages::new().before(mid).limit(fetch_limit);
                 match cid.messages(http, builder).await {
                     Ok(messages) => {
                         let bot_id = bot_user_id.load(std::sync::atomic::Ordering::Relaxed);
@@ -1614,10 +1666,8 @@ async fn process_next_in_queue(
             let ch_id: u64 = ch_id_str.parse().unwrap_or(0);
             let msg_id: u64 = wait_msg_id.parse().unwrap_or(0);
             if ch_id > 0 && msg_id > 0 {
-                let new_text = format!(
-                    "⏳ 待機中です（{}番目）。順番が来たら応答します。",
-                    new_pos
-                );
+                let new_text =
+                    format!("⏳ 待機中です（{}番目）。順番が来たら応答します。", new_pos);
                 let edit = serenity::EditMessage::new().content(&new_text);
                 rate_limiter
                     .acquire(rate_limiter::Route::ChannelMessage(ch_id))
@@ -1776,10 +1826,7 @@ async fn handle_stream_chunk(
         .get("callback_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let chunk = params
-        .get("chunk")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let chunk = params.get("chunk").and_then(|v| v.as_str()).unwrap_or("");
 
     if callback_id.is_empty() || chunk.is_empty() {
         return;
@@ -1787,9 +1834,7 @@ async fn handle_stream_chunk(
 
     // Check if stream already exists — if so, just append (no await needed)
     {
-        let mut states = streaming_states
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut states = streaming_states.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = states.get_mut(callback_id) {
             state.buffer.push_str(chunk);
             return;
@@ -1798,9 +1843,7 @@ async fn handle_stream_chunk(
 
     // New stream — extract callback context (drop lock before await)
     let (channel_id, interaction_token) = {
-        let cb_ctx = pending_callbacks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let cb_ctx = pending_callbacks.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ctx) = cb_ctx.get(callback_id) else {
             tracing::debug!("Stream chunk for unknown callback: {callback_id}");
             return;
@@ -1875,9 +1918,7 @@ async fn flush_streaming_edits(
 
     // Collect pending edits (drop lock before awaiting)
     let pending: Vec<_> = {
-        let mut states = streaming_states
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut states = streaming_states.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
         states
             .iter_mut()

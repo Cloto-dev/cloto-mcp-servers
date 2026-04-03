@@ -86,8 +86,7 @@ impl DiscordConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(180);
-        let reaction_queued =
-            env::var("DISCORD_REACTION_QUEUED").unwrap_or_else(|_| "⏳".into());
+        let reaction_queued = env::var("DISCORD_REACTION_QUEUED").unwrap_or_else(|_| "⏳".into());
 
         Self {
             bot_token,

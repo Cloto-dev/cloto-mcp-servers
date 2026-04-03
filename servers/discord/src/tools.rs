@@ -406,9 +406,7 @@ async fn execute_send_message(
         // Split into embed-sized chunks (4096 char limit per embed description)
         let chunks = utils::split_message(&content, 4096);
         for (i, chunk) in chunks.iter().enumerate() {
-            let mut embed = serenity::CreateEmbed::new()
-                .description(chunk)
-                .color(color);
+            let mut embed = serenity::CreateEmbed::new().description(chunk).color(color);
 
             // Apply rich formatting on first chunk only
             if i == 0 {
@@ -422,7 +420,10 @@ async fn execute_send_message(
                 for field in &embed_fields {
                     let name = field.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     let value = field.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                    let inline = field.get("inline").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let inline = field
+                        .get("inline")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     if !name.is_empty() && !value.is_empty() {
                         embed = embed.field(name, value, inline);
                     }
@@ -586,7 +587,11 @@ async fn execute_send_buttons(
             // Max 5 buttons per row
             let custom_id = btn.get("custom_id").and_then(|v| v.as_str()).unwrap_or("");
             let label = btn.get("label").and_then(|v| v.as_str()).unwrap_or("");
-            let style = match btn.get("style").and_then(|v| v.as_str()).unwrap_or("primary") {
+            let style = match btn
+                .get("style")
+                .and_then(|v| v.as_str())
+                .unwrap_or("primary")
+            {
                 "secondary" => serenity::ButtonStyle::Secondary,
                 "success" => serenity::ButtonStyle::Success,
                 "danger" => serenity::ButtonStyle::Danger,
@@ -609,10 +614,7 @@ async fn execute_send_buttons(
 
     // Select menu
     if let Some(menu) = args.get("select_menu") {
-        let custom_id = menu
-            .get("custom_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let custom_id = menu.get("custom_id").and_then(|v| v.as_str()).unwrap_or("");
         let placeholder = menu.get("placeholder").and_then(|v| v.as_str());
         let options = menu
             .get("options")
@@ -660,10 +662,7 @@ async fn execute_send_buttons(
         .await
         .map_err(|e| format!("Failed to send buttons: {e}"))?;
 
-    Ok((
-        text_result(format!("Buttons sent: {}", msg.id)),
-        vec![],
-    ))
+    Ok((text_result(format!("Buttons sent: {}", msg.id)), vec![]))
 }
 
 async fn execute_send_file(
@@ -693,7 +692,9 @@ async fn execute_send_file(
         msg_builder = msg_builder.content(text);
     }
 
-    rate_limiter.acquire(Route::ChannelMessage(channel_id)).await;
+    rate_limiter
+        .acquire(Route::ChannelMessage(channel_id))
+        .await;
     let msg = channel
         .send_message(http, msg_builder)
         .await
@@ -718,7 +719,9 @@ async fn execute_add_reaction(
     let message = serenity::MessageId::new(message_id);
     let emoji = serenity::ReactionType::Unicode(emoji_str.to_string());
 
-    rate_limiter.acquire(Route::ChannelReaction(channel_id)).await;
+    rate_limiter
+        .acquire(Route::ChannelReaction(channel_id))
+        .await;
     http.create_reaction(channel, message, &emoji)
         .await
         .map_err(|e| format!("Failed to add reaction: {e}"))?;
@@ -1023,7 +1026,9 @@ async fn execute_edit_message(
     let message = serenity::MessageId::new(message_id);
     let edit = serenity::EditMessage::new().content(&content);
 
-    rate_limiter.acquire(Route::ChannelMessage(channel_id)).await;
+    rate_limiter
+        .acquire(Route::ChannelMessage(channel_id))
+        .await;
     channel
         .edit_message(http, message, edit)
         .await
@@ -1043,7 +1048,9 @@ async fn execute_delete_message(
     let channel = serenity::ChannelId::new(channel_id);
     let message = serenity::MessageId::new(message_id);
 
-    rate_limiter.acquire(Route::ChannelMessage(channel_id)).await;
+    rate_limiter
+        .acquire(Route::ChannelMessage(channel_id))
+        .await;
     channel
         .delete_message(http, message)
         .await
@@ -1224,7 +1231,9 @@ async fn execute_create_thread(
 
     let cid = serenity::ChannelId::new(channel_id);
 
-    rate_limiter.acquire(Route::ChannelMessage(channel_id)).await;
+    rate_limiter
+        .acquire(Route::ChannelMessage(channel_id))
+        .await;
     let thread = if let Some(mid) = message_id {
         let builder = serenity::CreateThread::new(name).auto_archive_duration(archive_duration);
         cid.create_thread_from_message(http, serenity::MessageId::new(mid), builder)

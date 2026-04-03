@@ -135,9 +135,10 @@ impl MessageQueue {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, entry)| {
-                    entry.waiting_message_id.as_ref().map(|wid| {
-                        (wid.clone(), entry.channel_id.clone(), i + 1)
-                    })
+                    entry
+                        .waiting_message_id
+                        .as_ref()
+                        .map(|wid| (wid.clone(), entry.channel_id.clone(), i + 1))
                 })
                 .collect();
 

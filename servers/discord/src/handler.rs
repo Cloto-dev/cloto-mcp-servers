@@ -245,9 +245,7 @@ impl serenity::EventHandler for DiscordHandler {
         if let serenity::Interaction::Component(comp) = interaction {
             // Extract selected values from select menus (if applicable)
             let values = match &comp.data.kind {
-                serenity::ComponentInteractionDataKind::StringSelect { values } => {
-                    values.clone()
-                }
+                serenity::ComponentInteractionDataKind::StringSelect { values } => values.clone(),
                 _ => vec![],
             };
             let data = ComponentData {
@@ -356,8 +354,7 @@ impl serenity::EventHandler for DiscordHandler {
                     )
                     .required(true),
                 ),
-            serenity::CreateCommand::new("status")
-                .description("Show bridge status"),
+            serenity::CreateCommand::new("status").description("Show bridge status"),
         ];
 
         if let Err(e) = serenity::Command::set_global_commands(&ctx.http, commands).await {
