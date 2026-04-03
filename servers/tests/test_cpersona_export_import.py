@@ -243,9 +243,7 @@ async def test_export_episode_resolved_roundtrip():
     assert result["imported_episodes"] == 2
 
     # Verify resolved preserved after import
-    rows = await db.execute_fetchall(
-        "SELECT summary, resolved FROM episodes WHERE agent_id = 'agent.test' ORDER BY id"
-    )
+    rows = await db.execute_fetchall("SELECT summary, resolved FROM episodes WHERE agent_id = 'agent.test' ORDER BY id")
     assert len(rows) == 2
     resolved_map = {r[0][:10]: r[1] for r in rows}
     assert resolved_map["Completed "] == 1

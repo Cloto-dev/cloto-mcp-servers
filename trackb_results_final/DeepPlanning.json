@@ -1,0 +1,12 @@
+{
+  "task": "DeepPlanning",
+  "memory_type": "Procedural",
+  "mean_ndcg_at_10": 13.39,
+  "subtasks": {
+    "shopping_level1": 17.08,
+    "shopping_level2": 11.8,
+    "shopping_level3": 11.29
+  },
+  "num_subtasks": 3,
+  "time_s": 51.0
+}

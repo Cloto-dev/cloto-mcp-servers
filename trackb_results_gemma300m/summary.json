@@ -1,0 +1,408 @@
+{
+  "model": "google/embeddinggemma-300m",
+  "track": "B",
+  "pipeline": "CPersona Cascading Recall (Vector + FTS5 keyword)",
+  "code_path": "servers/cpersona/server.py do_store() + do_recall()",
+  "active_stages": [
+    "Stage 0: Vector (local BLOB cosine)",
+    "Stage 3: FTS5 keyword"
+  ],
+  "inactive_stages": [
+    "Stage 1: Episodes (no data)",
+    "Stage 2: Profile (no data)"
+  ],
+  "overall_mean": 57.12,
+  "tasks": [
+    {
+      "task": "EPBench",
+      "memory_type": "Episodic",
+      "mean_ndcg_at_10": 86.83,
+      "subtasks": {
+        "default_claude_long/Entities": 67.39,
+        "default_claude_long/Event_contents": 72.41,
+        "default_claude_long/Full_event_details": 92.62,
+        "default_claude_long/Other_entities": 92.62,
+        "default_claude_long/Spaces": 76.54,
+        "default_claude_long/Times": 83.64,
+        "default_claude_short/Entities": 90.12,
+        "default_claude_short/Event_contents": 94.19,
+        "default_claude_short/Full_event_details": 100.0,
+        "default_claude_short/Other_entities": 100.0,
+        "default_claude_short/Spaces": 95.24,
+        "default_claude_short/Times": 97.28,
+        "default_claude_very_long/Entities": 55.27,
+        "default_claude_very_long/Event_contents": 69.78,
+        "default_claude_very_long/Full_event_details": 92.62,
+        "default_claude_very_long/Other_entities": 92.62,
+        "default_claude_very_long/Spaces": 70.78,
+        "default_claude_very_long/Times": 77.32,
+        "default_gpt4o_long/Entities": 67.52,
+        "default_gpt4o_long/Event_contents": 77.21,
+        "default_gpt4o_long/Full_event_details": 92.62,
+        "default_gpt4o_long/Other_entities": 92.62,
+        "default_gpt4o_long/Spaces": 80.9,
+        "default_gpt4o_long/Times": 86.06,
+        "default_gpt4o_short/Entities": 90.36,
+        "default_gpt4o_short/Event_contents": 92.98,
+        "default_gpt4o_short/Full_event_details": 100.0,
+        "default_gpt4o_short/Other_entities": 100.0,
+        "default_gpt4o_short/Spaces": 94.53,
+        "default_gpt4o_short/Times": 96.05,
+        "sci_fi_claude_long/Entities": 79.84,
+        "sci_fi_claude_long/Event_contents": 74.68,
+        "sci_fi_claude_long/Full_event_details": 100.0,
+        "sci_fi_claude_long/Other_entities": 100.0,
+        "sci_fi_claude_long/Spaces": 56.58,
+        "sci_fi_claude_long/Times": 74.94,
+        "sci_fi_claude_short/Entities": 93.79,
+        "sci_fi_claude_short/Event_contents": 73.33,
+        "sci_fi_claude_short/Full_event_details": 100.0,
+        "sci_fi_claude_short/Other_entities": 100.0,
+        "sci_fi_claude_short/Spaces": 61.2,
+        "sci_fi_claude_short/Times": 74.47,
+        "world_news_claude_long/Entities": 82.79,
+        "world_news_claude_long/Event_contents": 79.91,
+        "world_news_claude_long/Full_event_details": 100.0,
+        "world_news_claude_long/Other_entities": 100.0,
+        "world_news_claude_long/Spaces": 80.5,
+        "world_news_claude_long/Times": 91.73,
+        "world_news_claude_short/Entities": 93.24,
+        "world_news_claude_short/Event_contents": 93.05,
+        "world_news_claude_short/Full_event_details": 100.0,
+        "world_news_claude_short/Other_entities": 100.0,
+        "world_news_claude_short/Spaces": 93.72,
+        "world_news_claude_short/Times": 93.73
+      },
+      "num_subtasks": 54,
+      "time_s": 92.9
+    },
+    {
+      "task": "KnowMeBench",
+      "memory_type": "Episodic",
+      "mean_ndcg_at_10": 47.14,
+      "subtasks": {
+        "event_driven/adversarial_abstention": 37.07,
+        "event_driven/information_extraction": 70.11,
+        "event_driven/mind-body_interaction": 26.33,
+        "event_driven/mnestic_trigger_analysis": 31.82,
+        "event_driven/temporal_reasoning": 30.09,
+        "flashback_intensive/adversarial_abstention": 55.99,
+        "flashback_intensive/information_extraction": 64.53,
+        "flashback_intensive/mind-body_interaction": 42.82,
+        "flashback_intensive/mnestic_trigger_analysis": 60.43,
+        "flashback_intensive/temporal_reasoning": 23.35,
+        "psychological_depth/adversarial_abstention": 45.26,
+        "psychological_depth/information_extraction": 82.3,
+        "psychological_depth/mind-body_interaction": 45.09,
+        "psychological_depth/mnestic_trigger_analysis": 52.46,
+        "psychological_depth/temporal_reasoning": 39.47
+      },
+      "num_subtasks": 15,
+      "time_s": 390.4
+    },
+    {
+      "task": "LoCoMo",
+      "memory_type": "Dialogue",
+      "mean_ndcg_at_10": 42.18,
+      "subtasks": {
+        "adversarial": 34.5,
+        "multi_hop": 32.88,
+        "open_domain": 28.73,
+        "single_hop": 58.45,
+        "temporal_reasoning": 56.34
+      },
+      "num_subtasks": 5,
+      "time_s": 166.7
+    },
+    {
+      "task": "LongMemEval",
+      "memory_type": "Dialogue",
+      "mean_ndcg_at_10": 77.12,
+      "subtasks": {
+        "knowledge_update": 87.63,
+        "multi_session": 70.14,
+        "single_session_assistant": 92.13,
+        "single_session_preference": 72.28,
+        "single_session_user": 71.83,
+        "temporal_reasoning": 68.69
+      },
+      "num_subtasks": 6,
+      "time_s": 7549.9
+    },
+    {
+      "task": "REALTALK",
+      "memory_type": "Dialogue",
+      "mean_ndcg_at_10": 41.83,
+      "subtasks": {
+        "commonsense": 27.77,
+        "multi_hop": 29.39,
+        "temporal_reasoning": 68.33
+      },
+      "num_subtasks": 3,
+      "time_s": 184.9
+    },
+    {
+      "task": "TMD",
+      "memory_type": "Dialogue",
+      "mean_ndcg_at_10": 33.96,
+      "subtasks": {
+        "content_time_qs": 62.06,
+        "date_span_time_qs": 72.6,
+        "dates_time_qs": 61.2,
+        "day_span_time_qs": 71.49,
+        "earlier_today_time_qs": 24.55,
+        "last_named_day_time_qs": 18.62,
+        "month_time_qs": 42.42,
+        "rel_day_time_qs": 4.17,
+        "rel_month_time_qs": 13.23,
+        "rel_session_time_qs": 3.86,
+        "session_span_time_qs": 17.35,
+        "session_time_qs": 15.91
+      },
+      "num_subtasks": 12,
+      "time_s": 545.8
+    },
+    {
+      "task": "MemBench",
+      "memory_type": "Dialogue",
+      "mean_ndcg_at_10": 70.59,
+      "subtasks": {
+        "aggregative": 81.81,
+        "comparative": 82.51,
+        "emotion": 56.61,
+        "knowledge_updating": 47.16,
+        "multi_hop": 36.96,
+        "multi_session_assistant": 84.75,
+        "post_processing": 38.29,
+        "preference": 89.07,
+        "single_hop": 91.84,
+        "single_session_assistant": 96.88
+      },
+      "num_subtasks": 10,
+      "time_s": 12071.8
+    },
+    {
+      "task": "ConvoMem",
+      "memory_type": "Dialogue",
+      "mean_ndcg_at_10": 58.43,
+      "subtasks": {
+        "abstention_evidence": 78.71,
+        "assistant_facts_evidence": 77.08,
+        "changing_evidence": 50.9,
+        "implicit_connection_evidence": 30.57,
+        "preference_evidence": 45.0,
+        "user_evidence": 68.35
+      },
+      "num_subtasks": 6,
+      "time_s": 14835.5
+    },
+    {
+      "task": "QASPER",
+      "memory_type": "Semantic",
+      "mean_ndcg_at_10": 74.08,
+      "subtasks": {
+        ".": 74.08
+      },
+      "num_subtasks": 1,
+      "time_s": 2339.6
+    },
+    {
+      "task": "NovelQA",
+      "memory_type": "Semantic",
+      "mean_ndcg_at_10": 26.65,
+      "subtasks": {
+        "Character": 36.04,
+        "Meaning": 33.62,
+        "Plot": 28.4,
+        "Relation": 21.05,
+        "Setting": 45.38,
+        "Span": 4.29,
+        "Times": 17.76
+      },
+      "num_subtasks": 7,
+      "time_s": 3675.3
+    },
+    {
+      "task": "PeerQA",
+      "memory_type": "Semantic",
+      "mean_ndcg_at_10": 29.83,
+      "subtasks": {
+        ".": 29.83
+      },
+      "num_subtasks": 1,
+      "time_s": 136.0
+    },
+    {
+      "task": "CovidQA",
+      "memory_type": "Semantic",
+      "mean_ndcg_at_10": 71.33,
+      "subtasks": {
+        ".": 71.33
+      },
+      "num_subtasks": 1,
+      "time_s": 258.3
+    },
+    {
+      "task": "ESGReports",
+      "memory_type": "Semantic",
+      "mean_ndcg_at_10": 42.71,
+      "subtasks": {
+        ".": 42.71
+      },
+      "num_subtasks": 1,
+      "time_s": 25.9
+    },
+    {
+      "task": "MLDR",
+      "memory_type": "Semantic",
+      "mean_ndcg_at_10": 77.12,
+      "subtasks": {
+        ".": 77.12
+      },
+      "num_subtasks": 1,
+      "time_s": 28.6
+    },
+    {
+      "task": "LooGLE",
+      "memory_type": "Semantic",
+      "mean_ndcg_at_10": 59.27,
+      "subtasks": {
+        "LongDepQA": 43.1,
+        "ShortDepQA": 75.44
+      },
+      "num_subtasks": 2,
+      "time_s": 1525.6
+    },
+    {
+      "task": "LMEB_SciFact",
+      "memory_type": "Semantic",
+      "mean_ndcg_at_10": 78.25,
+      "subtasks": {
+        ".": 78.25
+      },
+      "num_subtasks": 1,
+      "time_s": 52.3
+    },
+    {
+      "task": "Gorilla",
+      "memory_type": "Procedural",
+      "mean_ndcg_at_10": 33.01,
+      "subtasks": {
+        "gorilla_huggingface": 33.48,
+        "gorilla_pytorch": 32.76,
+        "gorilla_tensor": 32.79
+      },
+      "num_subtasks": 3,
+      "time_s": 235.8
+    },
+    {
+      "task": "ToolBench",
+      "memory_type": "Procedural",
+      "mean_ndcg_at_10": 56.33,
+      "subtasks": {
+        ".": 56.33
+      },
+      "num_subtasks": 1,
+      "time_s": 1233.3
+    },
+    {
+      "task": "ReMe",
+      "memory_type": "Episodic",
+      "mean_ndcg_at_10": 63.16,
+      "subtasks": {
+        "appworld_qwen3_14b/generalized_query": 50.55,
+        "appworld_qwen3_32b/generalized_query": 54.7,
+        "appworld_qwen3_8b/generalized_query": 46.54,
+        "bfcl_qwen3_14b/generalized_query": 81.67,
+        "bfcl_qwen3_14b/task_query": 58.53,
+        "bfcl_qwen3_32b/generalized_query": 73.12,
+        "bfcl_qwen3_32b/task_query": 63.74,
+        "bfcl_qwen3_8b/generalized_query": 76.11,
+        "bfcl_qwen3_8b/task_query": 63.46
+      },
+      "num_subtasks": 9,
+      "time_s": 311.0
+    },
+    {
+      "task": "Proced_mem_bench",
+      "memory_type": "Procedural",
+      "mean_ndcg_at_10": 51.23,
+      "subtasks": {
+        "easy": 46.87,
+        "hard": 47.36,
+        "medium": 59.46
+      },
+      "num_subtasks": 3,
+      "time_s": 13.8
+    },
+    {
+      "task": "MemGovern",
+      "memory_type": "Procedural",
+      "mean_ndcg_at_10": 86.47,
+      "subtasks": {
+        "Azure_azure-sdk-for-python": 83.72,
+        "ClusterHQ_flocker": 84.49,
+        "DataDog_integrations-core": 77.56,
+        "Microsoft_TypeScript": 96.3,
+        "PokemonGoF_PokemonGo-Bot": 84.83,
+        "Qiskit_qiskit-terra": 86.07,
+        "StackStorm_st2": 88.86,
+        "apache_airflow": 88.55,
+        "apache_incubator-airflow": 84.2,
+        "certbot_certbot": 84.77,
+        "dask_dask": 85.69,
+        "datalad_datalad": 87.23,
+        "django_django": 95.55,
+        "dmwm_WMCore": 85.04,
+        "encode_django-rest-framework": 87.26,
+        "facebook_react": 90.78,
+        "great-expectations_great_expectations": 84.78,
+        "home-assistant_core": 76.82,
+        "home-assistant_home-assistant": 70.91,
+        "huggingface_transformers": 90.13,
+        "kubernetes_kubernetes": 80.16,
+        "mesonbuild_meson": 85.09,
+        "microsoft_vscode": 96.43,
+        "mne-tools_mne-python": 85.7,
+        "moby_moby": 91.73,
+        "napari_napari": 88.23,
+        "numpy_numpy": 92.32,
+        "optuna_optuna": 82.36,
+        "pandas-dev_pandas": 86.59,
+        "pydata_xarray": 86.92,
+        "pypa_pip": 82.67,
+        "pytest-dev_pytest": 85.04,
+        "pytorch_pytorch": 87.74,
+        "raiden-network_raiden": 88.14,
+        "rust-lang_rust": 80.33,
+        "saltstack_salt": 89.35,
+        "scikit-learn_scikit-learn": 86.81,
+        "scipy_scipy": 90.63,
+        "scrapy_scrapy": 95.59,
+        "spack_spack": 60.49,
+        "sphinx-doc_sphinx": 89.31,
+        "spotify_luigi": 88.89,
+        "spring-projects_spring-framework": 96.21,
+        "spyder-ide_spyder": 88.44,
+        "sympy_sympy": 82.27,
+        "tensorflow_tensorflow": 89.5,
+        "webpack_webpack": 90.45,
+        "xonsh_xonsh": 89.69
+      },
+      "num_subtasks": 48,
+      "time_s": 69810.8
+    },
+    {
+      "task": "DeepPlanning",
+      "memory_type": "Procedural",
+      "mean_ndcg_at_10": 49.12,
+      "subtasks": {
+        "shopping_level1": 46.55,
+        "shopping_level2": 51.14,
+        "shopping_level3": 49.66
+      },
+      "num_subtasks": 3,
+      "time_s": 219.4
+    }
+  ]
+}

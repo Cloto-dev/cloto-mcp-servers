@@ -1,0 +1,10 @@
+{
+  "task": "PeerQA",
+  "memory_type": "Semantic",
+  "mean_ndcg_at_10": 29.83,
+  "subtasks": {
+    ".": 29.83
+  },
+  "num_subtasks": 1,
+  "time_s": 136.0
+}

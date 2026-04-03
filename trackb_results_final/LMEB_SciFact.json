@@ -1,0 +1,10 @@
+{
+  "task": "LMEB_SciFact",
+  "memory_type": "Semantic",
+  "mean_ndcg_at_10": 70.0,
+  "subtasks": {
+    ".": 70.0
+  },
+  "num_subtasks": 1,
+  "time_s": 50.0
+}

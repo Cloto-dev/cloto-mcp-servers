@@ -1,0 +1,12 @@
+{
+  "task": "Gorilla",
+  "memory_type": "Procedural",
+  "mean_ndcg_at_10": 12.88,
+  "subtasks": {
+    "gorilla_huggingface": 17.36,
+    "gorilla_pytorch": 4.59,
+    "gorilla_tensor": 16.69
+  },
+  "num_subtasks": 3,
+  "time_s": 45.8
+}

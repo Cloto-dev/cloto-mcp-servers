@@ -1,0 +1,12 @@
+{
+  "task": "Proced_mem_bench",
+  "memory_type": "Procedural",
+  "mean_ndcg_at_10": 40.28,
+  "subtasks": {
+    "easy": 37.55,
+    "hard": 35.32,
+    "medium": 47.97
+  },
+  "num_subtasks": 3,
+  "time_s": 1.9
+}

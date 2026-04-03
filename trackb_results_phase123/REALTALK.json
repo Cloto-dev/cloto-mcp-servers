@@ -1,0 +1,12 @@
+{
+  "task": "REALTALK",
+  "memory_type": "Dialogue",
+  "mean_ndcg_at_10": 27.93,
+  "subtasks": {
+    "commonsense": 22.16,
+    "multi_hop": 17.52,
+    "temporal_reasoning": 44.1
+  },
+  "num_subtasks": 3,
+  "time_s": 101.6
+}

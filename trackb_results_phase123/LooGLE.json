@@ -1,0 +1,11 @@
+{
+  "task": "LooGLE",
+  "memory_type": "Semantic",
+  "mean_ndcg_at_10": 49.39,
+  "subtasks": {
+    "LongDepQA": 35.6,
+    "ShortDepQA": 63.18
+  },
+  "num_subtasks": 2,
+  "time_s": 616.4
+}

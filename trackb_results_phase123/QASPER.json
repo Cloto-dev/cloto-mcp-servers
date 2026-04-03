@@ -1,0 +1,10 @@
+{
+  "task": "QASPER",
+  "memory_type": "Semantic",
+  "mean_ndcg_at_10": 67.14,
+  "subtasks": {
+    ".": 67.14
+  },
+  "num_subtasks": 1,
+  "time_s": 1325.1
+}

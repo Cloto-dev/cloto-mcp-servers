@@ -1,0 +1,19 @@
+{
+  "task": "MemBench",
+  "memory_type": "Dialogue",
+  "mean_ndcg_at_10": 63.53,
+  "subtasks": {
+    "aggregative": 72.53,
+    "comparative": 85.98,
+    "emotion": 50.46,
+    "knowledge_updating": 44.0,
+    "multi_hop": 31.38,
+    "multi_session_assistant": 80.3,
+    "post_processing": 30.33,
+    "preference": 69.9,
+    "single_hop": 78.38,
+    "single_session_assistant": 92.02
+  },
+  "num_subtasks": 10,
+  "time_s": 4660.2
+}

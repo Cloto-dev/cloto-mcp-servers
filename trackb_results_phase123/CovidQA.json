@@ -1,0 +1,10 @@
+{
+  "task": "CovidQA",
+  "memory_type": "Semantic",
+  "mean_ndcg_at_10": 63.6,
+  "subtasks": {
+    ".": 63.6
+  },
+  "num_subtasks": 1,
+  "time_s": 80.0
+}

@@ -1,0 +1,14 @@
+{
+  "task": "LoCoMo",
+  "memory_type": "Dialogue",
+  "mean_ndcg_at_10": 25.39,
+  "subtasks": {
+    "adversarial": 17.49,
+    "multi_hop": 20.35,
+    "open_domain": 16.35,
+    "single_hop": 35.67,
+    "temporal_reasoning": 37.07
+  },
+  "num_subtasks": 5,
+  "time_s": 54.3
+}

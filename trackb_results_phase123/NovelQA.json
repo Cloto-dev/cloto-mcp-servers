@@ -1,0 +1,16 @@
+{
+  "task": "NovelQA",
+  "memory_type": "Semantic",
+  "mean_ndcg_at_10": 19.23,
+  "subtasks": {
+    "Character": 24.27,
+    "Meaning": 21.56,
+    "Plot": 19.76,
+    "Relation": 19.75,
+    "Setting": 32.72,
+    "Span": 3.79,
+    "Times": 12.8
+  },
+  "num_subtasks": 7,
+  "time_s": 2232.8
+}

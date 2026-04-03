@@ -238,6 +238,7 @@ def _parse_context_timestamp(ts: str) -> str | None:
     """Parse an ISO-8601 timestamp and format for LLM context display."""
     try:
         from datetime import datetime
+
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         # Convert to local timezone for user-friendly display
         local_dt = dt.astimezone()
@@ -280,9 +281,7 @@ def build_chat_messages(
             if ts and role != "system":
                 ts_label = _parse_context_timestamp(ts)
                 if ts_label:
-                    messages.append(
-                        {"role": "system", "content": f"[The following message is from {ts_label}]"}
-                    )
+                    messages.append({"role": "system", "content": f"[The following message is from {ts_label}]"})
             messages.append({"role": role, "content": content})
         messages.append(
             {
@@ -637,6 +636,7 @@ def _error_response(error: Exception) -> list[TextContent]:
             )
         ]
     import logging
+
     logging.getLogger(__name__).error("Unexpected error in LLM handler: %s", error, exc_info=True)
     return [
         TextContent(

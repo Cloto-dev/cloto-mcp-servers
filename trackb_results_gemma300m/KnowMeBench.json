@@ -1,0 +1,24 @@
+{
+  "task": "KnowMeBench",
+  "memory_type": "Episodic",
+  "mean_ndcg_at_10": 47.14,
+  "subtasks": {
+    "event_driven/adversarial_abstention": 37.07,
+    "event_driven/information_extraction": 70.11,
+    "event_driven/mind-body_interaction": 26.33,
+    "event_driven/mnestic_trigger_analysis": 31.82,
+    "event_driven/temporal_reasoning": 30.09,
+    "flashback_intensive/adversarial_abstention": 55.99,
+    "flashback_intensive/information_extraction": 64.53,
+    "flashback_intensive/mind-body_interaction": 42.82,
+    "flashback_intensive/mnestic_trigger_analysis": 60.43,
+    "flashback_intensive/temporal_reasoning": 23.35,
+    "psychological_depth/adversarial_abstention": 45.26,
+    "psychological_depth/information_extraction": 82.3,
+    "psychological_depth/mind-body_interaction": 45.09,
+    "psychological_depth/mnestic_trigger_analysis": 52.46,
+    "psychological_depth/temporal_reasoning": 39.47
+  },
+  "num_subtasks": 15,
+  "time_s": 390.4
+}

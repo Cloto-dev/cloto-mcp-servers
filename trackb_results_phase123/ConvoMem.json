@@ -1,0 +1,15 @@
+{
+  "task": "ConvoMem",
+  "memory_type": "Dialogue",
+  "mean_ndcg_at_10": 60.25,
+  "subtasks": {
+    "abstention_evidence": 79.35,
+    "assistant_facts_evidence": 69.59,
+    "changing_evidence": 54.55,
+    "implicit_connection_evidence": 35.7,
+    "preference_evidence": 54.61,
+    "user_evidence": 67.71
+  },
+  "num_subtasks": 6,
+  "time_s": 5296.9
+}

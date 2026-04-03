@@ -1,0 +1,15 @@
+{
+  "task": "LongMemEval",
+  "memory_type": "Dialogue",
+  "mean_ndcg_at_10": 61.32,
+  "subtasks": {
+    "knowledge_update": 67.1,
+    "multi_session": 57.21,
+    "single_session_assistant": 91.95,
+    "single_session_preference": 51.37,
+    "single_session_user": 54.75,
+    "temporal_reasoning": 45.57
+  },
+  "num_subtasks": 6,
+  "time_s": 593.1
+}
