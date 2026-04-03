@@ -64,6 +64,8 @@ pub struct AttachmentData {
 
 #[derive(Debug)]
 pub struct ReferenceData {
+    pub message_id: String,
+    pub author_id: String,
     pub author_name: String,
     pub content: String,
 }
@@ -158,6 +160,8 @@ impl serenity::EventHandler for DiscordHandler {
             .referenced_message
             .as_ref()
             .map(|referenced| ReferenceData {
+                message_id: referenced.id.to_string(),
+                author_id: referenced.author.id.to_string(),
                 author_name: referenced.author.name.clone(),
                 content: referenced.content.clone(),
             });

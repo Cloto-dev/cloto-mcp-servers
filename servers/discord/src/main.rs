@@ -776,8 +776,15 @@ async fn handle_discord_event(
             }
 
             // ── Normal callback flow (with queue) ──
-            // Session = (channel_id, user_id) — physically separates conversation context
-            let session_id = format!("{}:{}", msg.channel_id, msg.author_id);
+            // Session scoping:
+            //   Thread → shared session (all participants share context)
+            //   Regular channel → per-user session
+            let is_thread = msg.thread_info.is_some();
+            let session_id = if is_thread {
+                format!("{}:shared", msg.channel_id)
+            } else {
+                format!("{}:{}", msg.channel_id, msg.author_id)
+            };
             let callback_id = format!(
                 "discord-{}-{}-{}",
                 msg.channel_id, msg.author_id, msg.message_id
@@ -1170,11 +1177,82 @@ async fn handle_discord_event(
     }
 }
 
+/// Traverse the reply chain starting from a reference, fetching up to 5 hops.
+/// Returns a list of messages from oldest (root) to newest (direct parent).
+async fn build_reply_chain(
+    http: &Option<Arc<serenity::Http>>,
+    channel_id: u64,
+    initial_ref: &handler::ReferenceData,
+    bot_user_id: &Arc<std::sync::atomic::AtomicU64>,
+) -> Vec<Value> {
+    const MAX_HOPS: usize = 5;
+    let Some(http) = http else {
+        return vec![];
+    };
+    if channel_id == 0 {
+        return vec![];
+    }
+
+    let bot_id = bot_user_id.load(std::sync::atomic::Ordering::Relaxed);
+    let cid = serenity::ChannelId::new(channel_id);
+    let mut chain = Vec::new();
+
+    // First entry from the reference we already have
+    let role = if initial_ref.author_id.parse::<u64>().unwrap_or(0) == bot_id {
+        "assistant"
+    } else {
+        "user"
+    };
+    chain.push(json!({
+        "role": role,
+        "name": initial_ref.author_name,
+        "content": utils::truncate_str(&initial_ref.content, 500),
+    }));
+
+    // Fetch further up the chain via Discord API
+    let mut cursor_id: u64 = initial_ref.message_id.parse().unwrap_or(0);
+    for _ in 1..MAX_HOPS {
+        if cursor_id == 0 {
+            break;
+        }
+        let mid = serenity::MessageId::new(cursor_id);
+        match cid.message(http, mid).await {
+            Ok(fetched) => {
+                let Some(ref parent) = fetched.referenced_message else {
+                    break; // No further parent
+                };
+                let parent_role = if parent.author.id.get() == bot_id {
+                    "assistant"
+                } else {
+                    "user"
+                };
+                chain.push(json!({
+                    "role": parent_role,
+                    "name": parent.author.name,
+                    "content": utils::truncate_str(&parent.content, 500),
+                }));
+                cursor_id = parent.id.get();
+            }
+            Err(e) => {
+                tracing::debug!("Reply chain fetch stopped: {e}");
+                break;
+            }
+        }
+    }
+
+    // Reverse so oldest (root) is first
+    chain.reverse();
+    chain
+}
+
 /// Build the callback notification payload for a Discord message.
 ///
-/// Context is strictly session-scoped: only messages from the current speaker
-/// and bot replies to them are included. Messages from other users are excluded
-/// entirely, preventing cross-user context contamination.
+/// Context scoping:
+///   - Thread sessions (session_id ends with ":shared"): all messages included
+///   - User sessions: only speaker's messages + bot replies to them
+///
+/// Reply chain: when the message is a reply, traverses the reference chain
+/// (up to 5 hops) to provide conversation lineage context.
 #[allow(clippy::too_many_arguments)]
 async fn build_callback_payload(
     callback_id: &str,
@@ -1187,10 +1265,9 @@ async fn build_callback_payload(
 ) -> Value {
     let channel_id: u64 = msg.channel_id.parse().unwrap_or(0);
     let msg_id: u64 = msg.message_id.parse().unwrap_or(0);
+    let is_shared_session = session_id.ends_with(":shared");
 
-    // Fetch session-scoped conversation context.
-    // Strict filtering: ONLY messages from this session (current user + bot replies to them).
-    // Other users' messages are completely excluded.
+    // Fetch conversation context (mode depends on session type)
     let effective_limit = if msg.content.len() < 20 {
         config.context_history_limit.min(5)
     } else {
@@ -1201,8 +1278,11 @@ async fn build_callback_payload(
             if channel_id > 0 && msg_id > 0 {
                 let cid = serenity::ChannelId::new(channel_id);
                 let mid = serenity::MessageId::new(msg_id);
-                // Fetch more than needed since we'll filter strictly
-                let fetch_limit = (effective_limit as u16 * 3).min(50) as u8;
+                let fetch_limit = if is_shared_session {
+                    effective_limit // Threads: all messages are relevant
+                } else {
+                    (effective_limit as u16 * 3).min(50) as u8 // Over-fetch for strict filter
+                };
                 let builder = serenity::GetMessages::new()
                     .before(mid)
                     .limit(fetch_limit);
@@ -1216,12 +1296,18 @@ async fn build_callback_payload(
                             .rev()
                             .filter(|m| !m.content.is_empty())
                             .filter(|m| {
-                                let is_speaker = m.author.id.get() == author_id;
-                                let is_bot_reply_to_speaker = m.author.id.get() == bot_id
-                                    && m.referenced_message
-                                        .as_ref()
-                                        .is_some_and(|r| r.author.id.get() == author_id);
-                                is_speaker || is_bot_reply_to_speaker
+                                if is_shared_session {
+                                    // Thread: include all messages
+                                    true
+                                } else {
+                                    // Per-user: strict session filter
+                                    let is_speaker = m.author.id.get() == author_id;
+                                    let is_bot_reply_to_speaker = m.author.id.get() == bot_id
+                                        && m.referenced_message
+                                            .as_ref()
+                                            .is_some_and(|r| r.author.id.get() == author_id);
+                                    is_speaker || is_bot_reply_to_speaker
+                                }
                             })
                             .take(limit)
                             .map(|m| {
@@ -1251,6 +1337,14 @@ async fn build_callback_payload(
         } else {
             vec![]
         }
+    } else {
+        vec![]
+    };
+
+    // Build reply chain: traverse referenced messages to provide conversation lineage.
+    // This allows User B replying to Bot's reply to User A to see the full thread.
+    let reference_chain = if let Some(ref reference) = msg.reference {
+        build_reply_chain(http, channel_id, reference, bot_user_id).await
     } else {
         vec![]
     };
@@ -1302,6 +1396,7 @@ async fn build_callback_payload(
             "author_name": r.author_name,
             "content": r.content,
         })),
+        "reference_chain": reference_chain,
         "conversation_context": conversation_context,
     });
     if let Some(ref ti) = msg.thread_info {
