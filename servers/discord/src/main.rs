@@ -1129,6 +1129,77 @@ async fn handle_discord_event(
                 }
             }
         }
+        DiscordEvent::ComponentInteraction(comp) => {
+            let iid = serenity::InteractionId::new(comp.interaction_id);
+
+            // Verify authorization: only DISCORD_DIRECT_TOOL_USERS can press action buttons
+            if !config.direct_tool_users.contains(&comp.user_id) {
+                // Ephemeral rejection (only the clicker sees this)
+                if let Some(http) = http {
+                    let _ = http
+                        .create_interaction_response(
+                            iid,
+                            &comp.interaction_token,
+                            &serde_json::to_value(json!({
+                                "type": 4,
+                                "data": {
+                                    "content": "🔒 この操作を行う権限がありません。",
+                                    "flags": 64
+                                }
+                            }))
+                            .unwrap(),
+                            vec![],
+                        )
+                        .await;
+                }
+                return;
+            }
+
+            // Acknowledge the interaction immediately
+            if let Some(http) = http {
+                let _ = http
+                    .create_interaction_response(
+                        iid,
+                        &comp.interaction_token,
+                        &serde_json::to_value(json!({
+                            "type": 4,
+                            "data": {
+                                "content": format!("✅ {} が操作しました。", comp.user_name),
+                                "flags": 64
+                            }
+                        }))
+                        .unwrap(),
+                        vec![],
+                    )
+                    .await;
+            }
+
+            // Emit as MGP notification for kernel processing
+            let notif = JsonRpcNotification::new(
+                "notifications/mgp.callback.request",
+                Some(json!({
+                    "callback_id": format!("discord-component-{}", comp.custom_id),
+                    "type": "component_interaction",
+                    "message": comp.custom_id,
+                    "metadata": {
+                        "source": "discord",
+                        "interaction_type": "component",
+                        "custom_id": comp.custom_id,
+                        "values": comp.values,
+                        "user_id": comp.user_id.to_string(),
+                        "user_name": comp.user_name,
+                        "channel_id": comp.channel_id,
+                    },
+                })),
+            );
+            write_message(stdout, &notif);
+
+            tracing::info!(
+                custom_id = %comp.custom_id,
+                user = %comp.user_name,
+                "Component interaction processed"
+            );
+        }
         DiscordEvent::Ready(data) => {
             bot_user_id.store(data.bot_user_id, std::sync::atomic::Ordering::Relaxed);
             if let Ok(mut g) = bridge_stats.connected_since.lock() {

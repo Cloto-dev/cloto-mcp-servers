@@ -15,9 +15,24 @@ use tokio::sync::mpsc;
 pub enum DiscordEvent {
     MessageCreate(Box<MessageData>),
     InteractionCreate(Box<InteractionData>),
+    ComponentInteraction(Box<ComponentData>),
     Ready(ReadyData),
     Resumed,
     ShardStageUpdate { old: String, new: String },
+}
+
+/// Data extracted from a button/select menu interaction.
+#[derive(Debug)]
+pub struct ComponentData {
+    pub interaction_id: u64,
+    pub interaction_token: String,
+    pub channel_id: String,
+    pub user_id: u64,
+    pub user_name: String,
+    /// The custom_id set on the component (e.g., "approve:callback-123").
+    pub custom_id: String,
+    /// Selected values (for select menus).
+    pub values: Vec<String>,
 }
 
 /// Data extracted from a slash command interaction.
@@ -218,6 +233,30 @@ impl serenity::EventHandler for DiscordHandler {
     }
 
     async fn interaction_create(&self, ctx: serenity::Context, interaction: serenity::Interaction) {
+        // Handle component interactions (buttons, select menus)
+        if let serenity::Interaction::Component(comp) = interaction {
+            // Extract selected values from select menus (if applicable)
+            let values = match &comp.data.kind {
+                serenity::ComponentInteractionDataKind::StringSelect { values } => {
+                    values.clone()
+                }
+                _ => vec![],
+            };
+            let data = ComponentData {
+                interaction_id: comp.id.get(),
+                interaction_token: comp.token.clone(),
+                channel_id: comp.channel_id.to_string(),
+                user_id: comp.user.id.get(),
+                user_name: comp.user.name.clone(),
+                custom_id: comp.data.custom_id.clone(),
+                values,
+            };
+            let _ = self
+                .event_tx
+                .send(DiscordEvent::ComponentInteraction(Box::new(data)));
+            return;
+        }
+
         let serenity::Interaction::Command(cmd) = interaction else {
             return;
         };

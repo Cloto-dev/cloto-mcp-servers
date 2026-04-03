@@ -14,6 +14,7 @@ use std::sync::Arc;
 pub fn tool_list() -> Vec<McpTool> {
     vec![
         send_message_schema(),
+        send_buttons_schema(),
         send_file_schema(),
         add_reaction_schema(),
         list_channels_schema(),
@@ -30,6 +31,7 @@ pub fn tool_list() -> Vec<McpTool> {
 /// All bridge-native tool names (used for direct command routing).
 pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "send_message",
+    "send_buttons",
     "send_file",
     "add_reaction",
     "list_channels",
@@ -54,6 +56,7 @@ pub async fn execute(
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     match tool_name {
         "send_message" => execute_send_message(args, http, config, rate_limiter).await,
+        "send_buttons" => execute_send_buttons(args, http, config, rate_limiter).await,
         "send_file" => execute_send_file(args, http, rate_limiter).await,
         "add_reaction" => execute_add_reaction(args, http, rate_limiter).await,
         "list_channels" => execute_list_channels(args, http, config).await,
@@ -475,6 +478,192 @@ async fn execute_send_message(
         sent_ids.join(", ")
     ));
     Ok((result, vec![]))
+}
+
+fn send_buttons_schema() -> McpTool {
+    McpTool {
+        name: "send_buttons".into(),
+        description: "Send a message with interactive buttons or a select menu. Each button has a custom_id that is returned when pressed. Use for confirmations, approvals, or choices.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "channel_id": {
+                    "type": "string",
+                    "description": "Discord channel ID"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Message text displayed above the components"
+                },
+                "buttons": {
+                    "type": "array",
+                    "description": "Array of buttons to display",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "custom_id": {
+                                "type": "string",
+                                "description": "Unique identifier returned on click (e.g. 'approve:req-123')"
+                            },
+                            "label": {
+                                "type": "string",
+                                "description": "Button text"
+                            },
+                            "style": {
+                                "type": "string",
+                                "enum": ["primary", "secondary", "success", "danger"],
+                                "description": "Button style (default: primary)"
+                            },
+                            "emoji": {
+                                "type": "string",
+                                "description": "Optional emoji to display on the button"
+                            }
+                        },
+                        "required": ["custom_id", "label"]
+                    }
+                },
+                "select_menu": {
+                    "type": "object",
+                    "description": "A select menu (alternative to buttons, mutually exclusive)",
+                    "properties": {
+                        "custom_id": {
+                            "type": "string",
+                            "description": "Unique identifier for the select menu"
+                        },
+                        "placeholder": {
+                            "type": "string",
+                            "description": "Placeholder text when nothing is selected"
+                        },
+                        "options": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": { "type": "string" },
+                                    "value": { "type": "string" },
+                                    "description": { "type": "string" }
+                                },
+                                "required": ["label", "value"]
+                            }
+                        }
+                    },
+                    "required": ["custom_id", "options"]
+                }
+            },
+            "required": ["channel_id", "content"]
+        }),
+    }
+}
+
+async fn execute_send_buttons(
+    args: &Value,
+    http: &Arc<serenity::Http>,
+    config: &crate::config::DiscordConfig,
+    rate_limiter: &Arc<RateLimiter>,
+) -> Result<(Value, Vec<JsonRpcNotification>), String> {
+    let channel_id = parse_id(args, "channel_id")?;
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or("content is required")?;
+
+    let content = if config.block_everyone {
+        utils::sanitize_mentions(content)
+    } else {
+        content.to_string()
+    };
+
+    let channel = serenity::ChannelId::new(channel_id);
+    let mut msg_builder = serenity::CreateMessage::new().content(&content);
+
+    // Build components
+    let mut action_row_components: Vec<serenity::CreateActionRow> = Vec::new();
+
+    // Buttons
+    if let Some(buttons) = args.get("buttons").and_then(|v| v.as_array()) {
+        let mut row_buttons: Vec<serenity::CreateButton> = Vec::new();
+        for btn in buttons.iter().take(5) {
+            // Max 5 buttons per row
+            let custom_id = btn.get("custom_id").and_then(|v| v.as_str()).unwrap_or("");
+            let label = btn.get("label").and_then(|v| v.as_str()).unwrap_or("");
+            let style = match btn.get("style").and_then(|v| v.as_str()).unwrap_or("primary") {
+                "secondary" => serenity::ButtonStyle::Secondary,
+                "success" => serenity::ButtonStyle::Success,
+                "danger" => serenity::ButtonStyle::Danger,
+                _ => serenity::ButtonStyle::Primary,
+            };
+
+            let mut button = serenity::CreateButton::new(custom_id)
+                .label(label)
+                .style(style);
+
+            if let Some(emoji_str) = btn.get("emoji").and_then(|v| v.as_str()) {
+                button = button.emoji(serenity::ReactionType::Unicode(emoji_str.to_string()));
+            }
+            row_buttons.push(button);
+        }
+        if !row_buttons.is_empty() {
+            action_row_components.push(serenity::CreateActionRow::Buttons(row_buttons));
+        }
+    }
+
+    // Select menu
+    if let Some(menu) = args.get("select_menu") {
+        let custom_id = menu
+            .get("custom_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let placeholder = menu.get("placeholder").and_then(|v| v.as_str());
+        let options = menu
+            .get("options")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let menu_options: Vec<serenity::CreateSelectMenuOption> = options
+            .iter()
+            .take(25) // Discord max
+            .filter_map(|opt| {
+                let label = opt.get("label").and_then(|v| v.as_str())?;
+                let value = opt.get("value").and_then(|v| v.as_str())?;
+                let mut option = serenity::CreateSelectMenuOption::new(label, value);
+                if let Some(desc) = opt.get("description").and_then(|v| v.as_str()) {
+                    option = option.description(desc);
+                }
+                Some(option)
+            })
+            .collect();
+
+        if !menu_options.is_empty() {
+            let mut select = serenity::CreateSelectMenu::new(
+                custom_id,
+                serenity::CreateSelectMenuKind::String {
+                    options: menu_options,
+                },
+            );
+            if let Some(ph) = placeholder {
+                select = select.placeholder(ph);
+            }
+            action_row_components.push(serenity::CreateActionRow::SelectMenu(select));
+        }
+    }
+
+    for row in &action_row_components {
+        msg_builder = msg_builder.components(vec![row.clone()]);
+    }
+
+    rate_limiter
+        .acquire(Route::ChannelMessage(channel_id))
+        .await;
+    let msg = channel
+        .send_message(http, msg_builder)
+        .await
+        .map_err(|e| format!("Failed to send buttons: {e}"))?;
+
+    Ok((
+        text_result(format!("Buttons sent: {}", msg.id)),
+        vec![],
+    ))
 }
 
 async fn execute_send_file(
