@@ -228,7 +228,7 @@ async def test_export_episode_resolved_roundtrip():
     # Verify resolved in export
     with open(export_path, encoding="utf-8") as f:
         lines = [json.loads(line) for line in f if line.strip()]
-    episodes = [l for l in lines if l.get("_type") == "episode"]
+    episodes = [entry for entry in lines if entry.get("_type") == "episode"]
     assert len(episodes) == 2
     resolved_values = {e["summary"][:10]: e["resolved"] for e in episodes}
     assert resolved_values["Completed "] is True
