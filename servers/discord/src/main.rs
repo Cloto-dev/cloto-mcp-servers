@@ -745,11 +745,17 @@ async fn handle_discord_event(
             }
 
             // ── Normal callback flow (with queue) ──
-            let callback_id = format!("discord-{}", msg.message_id);
+            // Session = (channel_id, user_id) — physically separates conversation context
+            let session_id = format!("{}:{}", msg.channel_id, msg.author_id);
+            let callback_id = format!(
+                "discord-{}-{}-{}",
+                msg.channel_id, msg.author_id, msg.message_id
+            );
 
             // Build the notification payload (used immediately or stored in queue)
             let notification_payload = build_callback_payload(
                 &callback_id,
+                &session_id,
                 &msg,
                 http,
                 config,
@@ -762,6 +768,7 @@ async fn handle_discord_event(
             let enqueue_result = {
                 let entry = QueueEntry {
                     callback_id: callback_id.clone(),
+                    session_id: session_id.clone(),
                     channel_id: msg.channel_id.clone(),
                     original_message_id: msg.message_id.clone(),
                     waiting_message_id: None,
@@ -827,6 +834,7 @@ async fn handle_discord_event(
                     //  so we rebuild it — the entry itself wasn't stored)
                     let payload = build_callback_payload(
                         &callback_id,
+                        &session_id,
                         &msg,
                         http,
                         config,
@@ -961,8 +969,14 @@ async fn handle_discord_event(
 }
 
 /// Build the callback notification payload for a Discord message.
+///
+/// Context is strictly session-scoped: only messages from the current speaker
+/// and bot replies to them are included. Messages from other users are excluded
+/// entirely, preventing cross-user context contamination.
+#[allow(clippy::too_many_arguments)]
 async fn build_callback_payload(
     callback_id: &str,
+    session_id: &str,
     msg: &handler::MessageData,
     http: &Option<Arc<serenity::Http>>,
     config: &Arc<DiscordConfig>,
@@ -972,7 +986,9 @@ async fn build_callback_payload(
     let channel_id: u64 = msg.channel_id.parse().unwrap_or(0);
     let msg_id: u64 = msg.message_id.parse().unwrap_or(0);
 
-    // Fetch conversation context with speaker prioritization
+    // Fetch session-scoped conversation context.
+    // Strict filtering: ONLY messages from this session (current user + bot replies to them).
+    // Other users' messages are completely excluded.
     let effective_limit = if msg.content.len() < 20 {
         config.context_history_limit.min(5)
     } else {
@@ -983,58 +999,44 @@ async fn build_callback_payload(
             if channel_id > 0 && msg_id > 0 {
                 let cid = serenity::ChannelId::new(channel_id);
                 let mid = serenity::MessageId::new(msg_id);
-                let fetch_limit = (effective_limit as u16 * 2).min(50) as u8;
+                // Fetch more than needed since we'll filter strictly
+                let fetch_limit = (effective_limit as u16 * 3).min(50) as u8;
                 let builder = serenity::GetMessages::new()
                     .before(mid)
                     .limit(fetch_limit);
                 match cid.messages(http, builder).await {
                     Ok(messages) => {
                         let bot_id = bot_user_id.load(std::sync::atomic::Ordering::Relaxed);
-                        let mut speaker_msgs = Vec::new();
-                        let mut other_msgs = Vec::new();
-
-                        for m in messages.iter().rev().filter(|m| !m.content.is_empty()) {
-                            let is_speaker = m.author.id.get() == author_id;
-                            let is_bot = m.author.id.get() == bot_id;
-                            let is_bot_reply_to_speaker = is_bot
-                                && m.referenced_message
-                                    .as_ref()
-                                    .is_some_and(|r| r.author.id.get() == author_id);
-
-                            let entry = if is_bot {
-                                json!({
-                                    "role": "assistant",
-                                    "content": utils::truncate_str(&m.content, 500),
-                                })
-                            } else {
-                                json!({
-                                    "role": "user",
-                                    "name": m.author.name,
-                                    "content": utils::truncate_str(&m.content, 500),
-                                })
-                            };
-
-                            if is_speaker || is_bot_reply_to_speaker {
-                                speaker_msgs.push(entry);
-                            } else {
-                                other_msgs.push(entry);
-                            }
-                        }
-
                         let limit = effective_limit as usize;
-                        let mut context = Vec::with_capacity(limit);
-                        for entry in speaker_msgs.into_iter().take(limit) {
-                            context.push(entry);
-                        }
-                        let remaining = limit.saturating_sub(context.len());
-                        if remaining > 0 {
-                            let other_count = remaining.min(3);
-                            let skip = other_msgs.len().saturating_sub(other_count);
-                            for entry in other_msgs.into_iter().skip(skip) {
-                                context.push(entry);
-                            }
-                        }
-                        context
+
+                        messages
+                            .iter()
+                            .rev()
+                            .filter(|m| !m.content.is_empty())
+                            .filter(|m| {
+                                let is_speaker = m.author.id.get() == author_id;
+                                let is_bot_reply_to_speaker = m.author.id.get() == bot_id
+                                    && m.referenced_message
+                                        .as_ref()
+                                        .is_some_and(|r| r.author.id.get() == author_id);
+                                is_speaker || is_bot_reply_to_speaker
+                            })
+                            .take(limit)
+                            .map(|m| {
+                                if m.author.id.get() == bot_id {
+                                    json!({
+                                        "role": "assistant",
+                                        "content": utils::truncate_str(&m.content, 500),
+                                    })
+                                } else {
+                                    json!({
+                                        "role": "user",
+                                        "name": m.author.name,
+                                        "content": utils::truncate_str(&m.content, 500),
+                                    })
+                                }
+                            })
+                            .collect()
                     }
                     Err(e) => {
                         tracing::warn!("Failed to fetch channel history: {e}");
@@ -1077,6 +1079,7 @@ async fn build_callback_payload(
     // Build metadata
     let mut metadata = json!({
         "source": "discord",
+        "session_id": session_id,
         "current_speaker": msg.author_name,
         "author_id": msg.author_id,
         "author_name": msg.author_name,

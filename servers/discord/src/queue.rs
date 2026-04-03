@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 pub struct QueueEntry {
     /// Unique callback ID for this message.
     pub callback_id: String,
+    /// Session ID (channel_id:user_id) for context scoping.
+    pub session_id: String,
     /// Discord channel ID where the message was sent.
     pub channel_id: String,
     /// Discord message ID of the original user message.
@@ -198,6 +200,7 @@ mod tests {
     fn make_entry(id: &str) -> QueueEntry {
         QueueEntry {
             callback_id: id.to_string(),
+            session_id: "100:1".to_string(),
             channel_id: "100".to_string(),
             original_message_id: id.to_string(),
             waiting_message_id: Some(format!("wait-{id}")),
