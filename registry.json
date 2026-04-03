@@ -207,8 +207,8 @@
       "name": "CPersona Memory",
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.4.5",
-      "changelog": "Extended check_health to 15 checks: FTS5 sync, schema version, JSON validity, timestamp consistency, stale tasks, null embedding auto-repair, storage stats, missing profiles.",
+      "version": "2.4.6",
+      "changelog": "Adaptive quality gate — dynamic threshold based on memory pool size prevents noise domination with sparse data. Profile injection gated (requires 50+ memories). Unscored results gated (requires 100+ memories).",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [

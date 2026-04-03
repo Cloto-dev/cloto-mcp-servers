@@ -895,6 +895,59 @@ def _autocut(results: list[dict]) -> list[dict]:
     return results[:cut_idx]
 
 
+def _adaptive_min_score(memory_count: int) -> float:
+    """Compute adaptive quality threshold based on memory pool size.
+
+    Fewer memories → stricter threshold (avoid noise domination).
+    More memories → lenient threshold (allow broader reference).
+
+    Returns:
+        0.5 (sparse, count~1) → 0.2 (dense, count~500+).
+        1.0 when count=0 (nothing should pass).
+    """
+    if memory_count <= 0:
+        return 1.0
+    t = min(1.0, math.log(memory_count + 1) / math.log(500))
+    return round(0.5 - t * 0.3, 4)
+
+
+def _apply_quality_gate(
+    results: list[dict],
+    min_score: float,
+    memory_count: int,
+) -> list[dict]:
+    """Adaptive quality gate — removes results below dynamic threshold.
+
+    Rules:
+    1. Scored results: _confidence_score or _rrf_score or _cosine < min_score → exclude
+    2. Profile injection: skip if memory_count < 50 (profile dominates with sparse data)
+    3. Unscored results (keyword/FTS only): keep only if memory_count >= 100
+    """
+    if not results:
+        return results
+
+    filtered = []
+    for r in results:
+        # Profile — gate by memory count
+        if r.get("id") == -1:  # profile sentinel
+            if memory_count >= 50:
+                filtered.append(r)
+            continue
+
+        # Get the best available score
+        score = r.get("_confidence_score") or r.get("_rrf_score") or r.get("_cosine")
+
+        if score is not None:
+            if score >= min_score:
+                filtered.append(r)
+        else:
+            # Unscored result (keyword/FTS without cosine)
+            if memory_count >= 100:
+                filtered.append(r)
+
+    return filtered
+
+
 async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, channel: str = "") -> dict:
     """Recall relevant memories using multi-strategy search.
 
@@ -952,6 +1005,13 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
                 last_recalled_at_str=rc_data[1],
             )["score"]
         results.sort(key=lambda r: r.get("_confidence_score", 0), reverse=True)
+
+    # v2.4.6: Adaptive quality gate — dynamic threshold based on memory pool size.
+    # Fewer memories → stricter filtering to prevent noise domination.
+    memory_count = (await db.execute_fetchall("SELECT COUNT(*) FROM memories WHERE agent_id = ?", (agent_id,)))[0][0]
+    min_score = _adaptive_min_score(memory_count)
+    effective_min = min_score * 0.5 if deep else min_score
+    results = _apply_quality_gate(results, effective_min, memory_count)
 
     # v2.4: Autocut — detect score gap and remove noise results
     if AUTOCUT_ENABLED:
