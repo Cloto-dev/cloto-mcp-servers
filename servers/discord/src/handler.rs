@@ -137,9 +137,15 @@ impl serenity::EventHandler for DiscordHandler {
             && msg.content.trim().ends_with('`');
 
         if !is_direct_command {
-            // Only respond to messages that mention the bot
             let bot_id = ctx.cache.current_user().id;
-            if !msg.mentions_user_id(bot_id) {
+            let mentions_bot = msg.mentions_user_id(bot_id);
+            // Also respond when the user replies to a bot message (no @mention needed)
+            let is_reply_to_bot = msg
+                .referenced_message
+                .as_ref()
+                .is_some_and(|r| r.author.id == bot_id);
+
+            if !mentions_bot && !is_reply_to_bot {
                 return;
             }
         }
