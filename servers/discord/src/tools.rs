@@ -51,7 +51,7 @@ pub async fn execute(
     args: &Value,
     http: &Arc<serenity::Http>,
     config: &crate::config::DiscordConfig,
-    bot_context: &Arc<std::sync::Mutex<Option<serenity::Context>>>,
+    bot_context: Option<&serenity::Context>,
     rate_limiter: &Arc<RateLimiter>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     match tool_name {
@@ -1061,7 +1061,7 @@ async fn execute_delete_message(
 
 async fn execute_set_presence(
     args: &Value,
-    bot_context: &Arc<std::sync::Mutex<Option<serenity::Context>>>,
+    bot_context: Option<&serenity::Context>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     let status_str = args
         .get("status")
@@ -1096,11 +1096,7 @@ async fn execute_set_presence(
         }
     });
 
-    let ctx = bot_context
-        .lock()
-        .map_err(|_| "Failed to lock context".to_string())?
-        .clone()
-        .ok_or("Discord context not available (not connected yet)")?;
+    let ctx = bot_context.ok_or("Discord context not available (not connected yet)")?;
 
     ctx.set_presence(activity, status);
 

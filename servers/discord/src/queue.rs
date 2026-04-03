@@ -98,6 +98,12 @@ impl MessageQueue {
         self.active_callback_id.is_some()
     }
 
+    /// Mark a callback as the active (processing) item without going through the queue.
+    /// Used when the queue is idle and we want to process immediately.
+    pub fn set_active(&mut self, callback_id: String) {
+        self.active_callback_id = Some(callback_id);
+    }
+
     /// Number of items waiting in the queue.
     pub fn waiting_count(&self) -> usize {
         self.waiting.len()
