@@ -549,8 +549,7 @@ def create_provider() -> EmbeddingProvider:
         return OnnxJinaV5NanoProvider(model_dir=ONNX_MODEL_DIR)
     else:
         raise ValueError(
-            f"Unknown embedding provider: {EMBEDDING_PROVIDER}. "
-            f"Supported: api_openai, onnx_miniml, onnx_jina_v5_nano"
+            f"Unknown embedding provider: {EMBEDDING_PROVIDER}. Supported: api_openai, onnx_miniml, onnx_jina_v5_nano"
         )
 
 
