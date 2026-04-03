@@ -212,12 +212,15 @@
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [
+        { "key": "CPERSONA_DB_PATH", "default": "./cpersona.db", "description": "SQLite database path" },
         { "key": "CPERSONA_EMBEDDING_MODE", "default": "none", "description": "Embedding mode (none, http, or api)" },
         { "key": "CPERSONA_EMBEDDING_URL", "default": "http://127.0.0.1:8401/embed", "description": "Embedding endpoint" }
       ],
       "optional_env_vars": [
-        { "key": "CPERSONA_LLM_PROVIDER", "default": "cerebras", "description": "LLM provider for summarization" },
-        { "key": "CPERSONA_LLM_MODEL", "default": "gpt-oss-120b", "description": "LLM model for summarization" }
+        { "key": "CPERSONA_SEARCH_MODE", "default": "rrf", "description": "Search strategy (rrf or cascade)" },
+        { "key": "CPERSONA_CONFIDENCE_ENABLED", "default": "false", "description": "Include confidence metadata in recall results" },
+        { "key": "CPERSONA_AUTO_CALIBRATE", "default": "false", "description": "Auto-calibrate vector threshold on startup" },
+        { "key": "CPERSONA_RRF_K", "default": "60", "description": "RRF smoothing parameter" }
       ],
       "tags": ["core", "memory", "persona", "embedding"],
       "trust_level": "core",

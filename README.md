@@ -5,13 +5,16 @@ MCP server collection for the [ClotoCore](https://github.com/Cloto-dev/ClotoCore
 ## CPersona — AI Memory Server
 
 **CPersona** (`servers/cpersona/`) is an MCP Memory Server that gives Claude persistent memory.
+See the [cpersona README](servers/cpersona/README.md) for full documentation.
 
-- 3-layer hybrid search (vector + FTS5 full-text + keyword)
-- Episodic memory (automatic conversation summarization) and profile memory (user attribute accumulation)
-- Confidence Score with time decay
-- Full namespace isolation between agents
+- 3-layer hybrid search (vector + FTS5 full-text + keyword) with RRF merge
+- Confidence scoring with dynamic time decay, recall boost, and completion factor
+- Episodic memory (conversation summarization) and profile memory (user attributes)
+- Zero LLM dependency — pure data server, all intelligence stays in the calling agent
+- 16 tools including health check, auto-calibration, JSONL export/import, and agent merge
+- Agent namespace isolation
 - stdio + Streamable HTTP transport
-- Single-file SQLite DB / minimal dependencies (Python + numpy)
+- Single-file SQLite DB (schema v7, auto-migrating)
 
 **License: MIT** — free to use from any MCP host.
 
@@ -40,7 +43,7 @@ pip install -r requirements.lock
       "command": "/path/to/servers/.venv/bin/python",
       "args": ["/path/to/servers/embedding/server.py"],
       "env": {
-        "EMBEDDING_PROVIDER": "onnx_miniml",
+        "EMBEDDING_PROVIDER": "onnx_jina_v5_nano",
         "EMBEDDING_HTTP_PORT": "8401"
       }
     },
@@ -51,8 +54,7 @@ pip install -r requirements.lock
         "CPERSONA_DB_PATH": "/home/yourname/.claude/cpersona.db",
         "CPERSONA_EMBEDDING_MODE": "http",
         "CPERSONA_EMBEDDING_URL": "http://127.0.0.1:8401/embed",
-        "CPERSONA_VECTOR_SEARCH_MODE": "remote",
-        "CPERSONA_TASK_QUEUE_ENABLED": "false"
+        "CPERSONA_VECTOR_SEARCH_MODE": "remote"
       }
     }
   }
@@ -72,7 +74,7 @@ claude mcp add-json embedding '{
   "command": "/path/to/servers/.venv/bin/python",
   "args": ["/path/to/servers/embedding/server.py"],
   "env": {
-    "EMBEDDING_PROVIDER": "onnx_miniml",
+    "EMBEDDING_PROVIDER": "onnx_jina_v5_nano",
     "EMBEDDING_HTTP_PORT": "8401"
   }
 }' -s user
@@ -85,8 +87,7 @@ claude mcp add-json cpersona '{
     "CPERSONA_DB_PATH": "/home/yourname/.claude/cpersona.db",
     "CPERSONA_EMBEDDING_MODE": "http",
     "CPERSONA_EMBEDDING_URL": "http://127.0.0.1:8401/embed",
-    "CPERSONA_VECTOR_SEARCH_MODE": "remote",
-    "CPERSONA_TASK_QUEUE_ENABLED": "false"
+    "CPERSONA_VECTOR_SEARCH_MODE": "remote"
   }
 }' -s user
 ```
