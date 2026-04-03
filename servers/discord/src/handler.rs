@@ -61,6 +61,8 @@ pub struct MessageData {
     pub author_id: String,
     pub author_name: String,
     pub author_bot: bool,
+    pub is_webhook: bool,
+    pub webhook_id: Option<String>,
     pub author_roles: Vec<String>,
     pub content: String,
     pub timestamp: String,
@@ -111,8 +113,10 @@ pub struct DiscordHandler {
 #[async_trait]
 impl serenity::EventHandler for DiscordHandler {
     async fn message(&self, ctx: serenity::Context, msg: serenity::Message) {
-        // Skip bot messages to prevent loops
-        if msg.author.bot {
+        // Skip OUR bot's messages to prevent loops.
+        // Allow other bots/webhooks through — they're forwarded as webhook_message events.
+        let bot_id = ctx.cache.current_user().id;
+        if msg.author.id == bot_id {
             return;
         }
 
@@ -153,8 +157,10 @@ impl serenity::EventHandler for DiscordHandler {
             && !msg.content.trim().starts_with("```")
             && msg.content.trim().ends_with('`');
 
-        if !is_direct_command {
-            let bot_id = ctx.cache.current_user().id;
+        // Webhook/bot messages bypass mention requirement — always forwarded
+        let is_webhook_or_bot = msg.author.bot || msg.webhook_id.is_some();
+
+        if !is_direct_command && !is_webhook_or_bot {
             let mentions_bot = msg.mentions_user_id(bot_id);
             // Also respond when the user replies to a bot message (no @mention needed)
             let is_reply_to_bot = msg
@@ -210,6 +216,8 @@ impl serenity::EventHandler for DiscordHandler {
                 .await
                 .unwrap_or_else(|| msg.author.name.clone()),
             author_bot: msg.author.bot,
+            is_webhook: msg.webhook_id.is_some(),
+            webhook_id: msg.webhook_id.map(|id| id.to_string()),
             author_roles,
             content: clean_content,
             timestamp: msg.timestamp.to_string(),

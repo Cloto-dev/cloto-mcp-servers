@@ -59,6 +59,24 @@ type PendingCallbacks = Arc<Mutex<HashMap<String, CallbackContext>>>;
 type BotContext = Arc<std::sync::Mutex<Option<serenity::Context>>>;
 type SharedQueue = Arc<Mutex<MessageQueue>>;
 
+/// State for an active streaming response (progressive message editing).
+struct StreamState {
+    /// The Discord message ID being edited with streaming content.
+    message_id: u64,
+    channel_id: u64,
+    /// Accumulated content buffer.
+    buffer: String,
+    /// Last time we edited the message.
+    last_edit: std::time::Instant,
+    /// Whether this is an interaction response (uses webhook edit instead).
+    interaction_token: Option<String>,
+}
+
+/// Minimum interval between streaming edits (1.5 seconds).
+const STREAM_EDIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+type StreamingStates = Arc<Mutex<HashMap<String, StreamState>>>;
+
 /// Internal counters for bridge health monitoring.
 struct BridgeStats {
     connected_since: std::sync::Mutex<Option<std::time::Instant>>,
@@ -200,21 +218,27 @@ async fn main() {
         config.queue_max_size,
         config.queue_timeout_secs,
     )));
+    let streaming_states: StreamingStates = Arc::new(Mutex::new(HashMap::new()));
 
     // Periodic intervals
     let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(300));
     cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut queue_timeout_interval = tokio::time::interval(std::time::Duration::from_secs(15));
     queue_timeout_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut stream_flush_interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    stream_flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Main loop: multiplex stdin JSON-RPC and Discord Gateway events
     loop {
         tokio::select! {
             Some(line) = stdin_rx.recv() => {
-                handle_stdin_line(&line, &stdout, &http, &config, &pending_callbacks, &bot_context, &bridge_stats, &rate_limiter, &message_queue).await;
+                handle_stdin_line(&line, &stdout, &http, &config, &pending_callbacks, &bot_context, &bridge_stats, &rate_limiter, &message_queue, &streaming_states).await;
             }
             Some(event) = discord_rx.recv() => {
                 handle_discord_event(event, &stdout, &pending_callbacks, &http, &config, &bot_user_id, &bridge_stats, &rate_limiter, &message_queue).await;
+            }
+            _ = stream_flush_interval.tick() => {
+                flush_streaming_edits(&streaming_states, &http, &rate_limiter).await;
             }
             _ = cleanup_interval.tick() => {
                 rate_limiter.cleanup().await;
@@ -240,6 +264,7 @@ async fn handle_stdin_line(
     bridge_stats: &Arc<BridgeStats>,
     rate_limiter: &Arc<RateLimiter>,
     message_queue: &SharedQueue,
+    streaming_states: &StreamingStates,
 ) {
     let request: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -250,9 +275,14 @@ async fn handle_stdin_line(
         }
     };
 
-    // Notifications (no id) — acknowledge silently
+    // Notifications (no id)
     if request.id.is_none() {
-        tracing::debug!("Received notification: {}", request.method);
+        // Handle streaming chunks
+        if request.method == "notifications/mgp.stream.chunk" {
+            handle_stream_chunk(&request, http, pending_callbacks, streaming_states, rate_limiter, config).await;
+        } else {
+            tracing::debug!("Received notification: {}", request.method);
+        }
         return;
     }
 
@@ -266,6 +296,7 @@ async fn handle_stdin_line(
         rate_limiter,
         message_queue,
         stdout,
+        streaming_states,
     )
     .await;
 
@@ -287,6 +318,7 @@ async fn dispatch(
     rate_limiter: &Arc<RateLimiter>,
     message_queue: &SharedQueue,
     stdout: &Arc<Mutex<io::Stdout>>,
+    streaming_states: &StreamingStates,
 ) -> (JsonRpcResponse, Vec<JsonRpcNotification>) {
     match request.method.as_str() {
         "initialize" => (handle_initialize(request), vec![]),
@@ -304,6 +336,7 @@ async fn dispatch(
                 rate_limiter,
                 message_queue,
                 stdout,
+                streaming_states,
             )
             .await,
             vec![],
@@ -465,6 +498,7 @@ async fn handle_callback_respond(
     rate_limiter: &Arc<RateLimiter>,
     message_queue: &SharedQueue,
     stdout: &Arc<Mutex<io::Stdout>>,
+    streaming_states: &StreamingStates,
 ) -> JsonRpcResponse {
     let params = match &request.params {
         Some(p) => p,
@@ -523,10 +557,71 @@ async fn handle_callback_respond(
         );
     }
 
+    // Check if there's an active streaming state for this callback.
+    // If so, finalize by editing the existing message instead of sending a new one.
+    let stream_state = streaming_states
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(callback_id);
+
     let http_opt = http; // Preserve original Option for queue processing
     let Some(http) = http else {
         return JsonRpcResponse::err(request.id.clone(), -32000, "Discord not connected");
     };
+
+    // If streaming was active, edit the stream message with final content
+    if let Some(ss) = &stream_state {
+        if let Some(ref token) = ss.interaction_token {
+            let edit = serenity::EditInteractionResponse::new().content(response);
+            let _ = http
+                .edit_original_interaction_response(token, &edit, vec![])
+                .await;
+        } else if ss.channel_id > 0 && ss.message_id > 0 {
+            rate_limiter
+                .acquire(rate_limiter::Route::ChannelMessage(ss.channel_id))
+                .await;
+            let edit = serenity::EditMessage::new().content(response);
+            let _ = serenity::ChannelId::new(ss.channel_id)
+                .edit_message(http, serenity::MessageId::new(ss.message_id), edit)
+                .await;
+        }
+        bridge_stats
+            .messages_sent
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Handle reactions for the original message (Message mode only)
+        if let ResponseMode::Message { .. } = &ctx_response_mode {
+            let channel_id: u64 = ctx_channel_id.parse().unwrap_or(0);
+            let message_id: u64 = ctx_message_id.parse().unwrap_or(0);
+            if channel_id > 0 && message_id > 0 {
+                let emoji = serenity::ReactionType::Unicode(config.reaction_done.clone());
+                let _ = http
+                    .create_reaction(
+                        serenity::ChannelId::new(channel_id),
+                        serenity::MessageId::new(message_id),
+                        &emoji,
+                    )
+                    .await;
+                let processing_emoji =
+                    serenity::ReactionType::Unicode(config.reaction_processing.clone());
+                let _ = http
+                    .delete_reaction_me(
+                        serenity::ChannelId::new(channel_id),
+                        serenity::MessageId::new(message_id),
+                        &processing_emoji,
+                    )
+                    .await;
+            }
+        }
+
+        tracing::info!(callback_id = %callback_id, "Streaming response finalized");
+        let result = JsonRpcResponse::ok(
+            request.id.clone(),
+            json!({"status": "sent", "callback_id": callback_id, "mode": "stream_finalized"}),
+        );
+        process_next_in_queue(message_queue, http_opt, config, pending_callbacks, rate_limiter, stdout).await;
+        return result;
+    }
 
     let result = match ctx_response_mode {
         ResponseMode::Interaction { token } => {
@@ -1020,6 +1115,8 @@ async fn handle_discord_event(
                 author_id: interaction.author_id.clone(),
                 author_name: interaction.author_name.clone(),
                 author_bot: false,
+                is_webhook: false,
+                webhook_id: None,
                 author_roles: interaction.author_roles.clone(),
                 content: interaction.message.clone(),
                 timestamp: interaction.timestamp.clone(),
@@ -1457,6 +1554,8 @@ async fn build_callback_payload(
         "message_id": msg.message_id,
         "timestamp": msg.timestamp,
         "is_thread": msg.thread_info.is_some(),
+        "is_webhook": msg.is_webhook,
+        "webhook_id": msg.webhook_id,
         "attachments": msg.attachments.iter().map(|a| json!({
             "url": a.url,
             "filename": a.filename,
@@ -1481,9 +1580,15 @@ async fn build_callback_payload(
         );
     }
 
+    let callback_type = if msg.is_webhook {
+        "webhook_message"
+    } else {
+        "external_message"
+    };
+
     json!({
         "callback_id": callback_id,
-        "type": "external_message",
+        "type": callback_type,
         "message": message_content,
         "metadata": metadata,
     })
@@ -1651,6 +1756,158 @@ async fn handle_queue_timeouts(
                 callback_id = %entry.callback_id,
                 "Queue entry timed out"
             );
+        }
+    }
+}
+
+/// Handle an incoming stream chunk notification — buffer content for periodic editing.
+async fn handle_stream_chunk(
+    request: &JsonRpcRequest,
+    http: &Option<Arc<serenity::Http>>,
+    pending_callbacks: &PendingCallbacks,
+    streaming_states: &StreamingStates,
+    rate_limiter: &Arc<RateLimiter>,
+    _config: &Arc<DiscordConfig>,
+) {
+    let Some(params) = &request.params else {
+        return;
+    };
+    let callback_id = params
+        .get("callback_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let chunk = params
+        .get("chunk")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if callback_id.is_empty() || chunk.is_empty() {
+        return;
+    }
+
+    // Check if stream already exists — if so, just append (no await needed)
+    {
+        let mut states = streaming_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = states.get_mut(callback_id) {
+            state.buffer.push_str(chunk);
+            return;
+        }
+    }
+
+    // New stream — extract callback context (drop lock before await)
+    let (channel_id, interaction_token) = {
+        let cb_ctx = pending_callbacks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(ctx) = cb_ctx.get(callback_id) else {
+            tracing::debug!("Stream chunk for unknown callback: {callback_id}");
+            return;
+        };
+        let ch: u64 = ctx.channel_id.parse().unwrap_or(0);
+        let token = match &ctx.response_mode {
+            ResponseMode::Interaction { token } => Some(token.clone()),
+            _ => None,
+        };
+        (ch, token)
+    };
+
+    let Some(http) = http else {
+        return;
+    };
+
+    let initial_content = format!("{chunk}…");
+    let callback_id_owned = callback_id.to_string();
+
+    if let Some(ref token) = interaction_token {
+        let edit = serenity::EditInteractionResponse::new().content(&initial_content);
+        let _ = http
+            .edit_original_interaction_response(token, &edit, vec![])
+            .await;
+        streaming_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                callback_id_owned,
+                StreamState {
+                    message_id: 0,
+                    channel_id,
+                    buffer: chunk.to_string(),
+                    last_edit: std::time::Instant::now(),
+                    interaction_token: Some(token.clone()),
+                },
+            );
+    } else if channel_id > 0 {
+        let cid = serenity::ChannelId::new(channel_id);
+        let msg_builder = serenity::CreateMessage::new().content(&initial_content);
+        rate_limiter
+            .acquire(rate_limiter::Route::ChannelMessage(channel_id))
+            .await;
+        if let Ok(sent) = cid.send_message(http, msg_builder).await {
+            streaming_states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    callback_id_owned,
+                    StreamState {
+                        message_id: sent.id.get(),
+                        channel_id,
+                        buffer: chunk.to_string(),
+                        last_edit: std::time::Instant::now(),
+                        interaction_token: None,
+                    },
+                );
+        }
+    }
+}
+
+/// Periodically flush streaming edit buffers (called from main loop every 500ms).
+/// Only edits if >= 1.5s have elapsed since last edit.
+async fn flush_streaming_edits(
+    streaming_states: &StreamingStates,
+    http: &Option<Arc<serenity::Http>>,
+    rate_limiter: &Arc<RateLimiter>,
+) {
+    let Some(http) = http else {
+        return;
+    };
+
+    // Collect pending edits (drop lock before awaiting)
+    let pending: Vec<_> = {
+        let mut states = streaming_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        states
+            .iter_mut()
+            .filter(|(_, s)| now.duration_since(s.last_edit) >= STREAM_EDIT_INTERVAL)
+            .map(|(_, s)| {
+                s.last_edit = now;
+                (
+                    s.channel_id,
+                    s.message_id,
+                    format!("{}…", s.buffer),
+                    s.interaction_token.clone(),
+                )
+            })
+            .collect()
+    };
+
+    for (channel_id, message_id, content, interaction_token) in pending {
+        if let Some(ref token) = interaction_token {
+            let edit = serenity::EditInteractionResponse::new().content(&content);
+            let _ = http
+                .edit_original_interaction_response(token, &edit, vec![])
+                .await;
+        } else if channel_id > 0 && message_id > 0 {
+            rate_limiter
+                .acquire(rate_limiter::Route::ChannelMessage(channel_id))
+                .await;
+            let edit = serenity::EditMessage::new().content(&content);
+            let _ = serenity::ChannelId::new(channel_id)
+                .edit_message(http, serenity::MessageId::new(message_id), edit)
+                .await;
         }
     }
 }
