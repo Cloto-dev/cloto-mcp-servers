@@ -302,8 +302,8 @@
       "name": "Discord Bridge",
       "description": "Bidirectional Discord communication — receive messages via MGP events, send via MCP tools",
       "category": "io",
-      "version": "0.3.2",
-      "changelog": "Fix multi-user context confusion — prefix callback message with [author_name]",
+      "version": "0.4.0",
+      "changelog": "Rate limiter, message queue, speaker-priority context, rich embeds, gateway reconnect",
       "directory": "discord",
       "runtime": "rust",
       "bin_name": "mgp-discord",
@@ -316,7 +316,9 @@
         { "key": "ALLOWED_GUILD_IDS", "default": "", "description": "Comma-separated guild IDs (empty = all)" },
         { "key": "BLOCK_EVERYONE", "default": "true", "description": "Block @everyone/@here in outgoing messages" },
         { "key": "DISCORD_DIRECT_TOOL_USERS", "default": "", "description": "Comma-separated Discord user IDs authorized for backtick tool commands" },
-        { "key": "DISCORD_DIRECT_TOOL_ECOSYSTEM", "default": "", "description": "Comma-separated ecosystem tool names available via backtick commands" }
+        { "key": "DISCORD_DIRECT_TOOL_ECOSYSTEM", "default": "", "description": "Comma-separated ecosystem tool names available via backtick commands" },
+        { "key": "DISCORD_QUEUE_MAX", "default": "5", "description": "Maximum queue size for pending messages (1-10)" },
+        { "key": "DISCORD_QUEUE_TIMEOUT_SECS", "default": "180", "description": "Timeout in seconds for queued messages" }
       ],
       "tags": ["discord", "bridge", "mgp", "io"],
       "trust_level": "standard",
