@@ -33,6 +33,14 @@ use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+/// How the callback response should be delivered.
+enum ResponseMode {
+    /// Regular channel message (with optional reply-to).
+    Message { is_reply: bool },
+    /// Edit a deferred interaction response.
+    Interaction { token: String },
+}
+
 /// Context stored for pending callbacks awaiting kernel response.
 struct CallbackContext {
     channel_id: String,
@@ -41,9 +49,8 @@ struct CallbackContext {
     message_id: String,
     #[allow(dead_code)]
     author_name: String,
-    /// Whether the original message was a reply to a bot message.
-    /// If true, the response uses reply format; otherwise, a normal message.
-    is_reply: bool,
+    /// How to deliver the response.
+    response_mode: ResponseMode,
     /// Typing indicator guard — dropping this stops the typing indicator.
     _typing: Option<serenity::http::Typing>,
 }
@@ -481,7 +488,7 @@ async fn handle_callback_respond(
         .unwrap_or_else(|e| e.into_inner())
         .remove(callback_id);
 
-    let Some(ctx) = ctx else {
+    let Some(mut ctx) = ctx else {
         tracing::warn!(callback_id = %callback_id, "No pending callback found");
         return JsonRpcResponse::ok(
             request.id.clone(),
@@ -490,12 +497,13 @@ async fn handle_callback_respond(
     };
 
     // Extract values and immediately drop ctx to stop typing indicator.
-    // Serenity's Typing guard runs a background task that POSTs typing every ~9s;
-    // dropping it aborts the task. Holding ctx until function end causes typing to
-    // persist through the entire send_message + reaction flow.
     let ctx_channel_id = ctx.channel_id.clone();
     let ctx_message_id = ctx.message_id.clone();
-    let ctx_is_reply = ctx.is_reply;
+    // Take response_mode out by replacing with a dummy, then drop ctx to stop typing
+    let ctx_response_mode = std::mem::replace(
+        &mut ctx.response_mode,
+        ResponseMode::Message { is_reply: false },
+    );
     drop(ctx); // ← _typing dropped here → typing stops immediately
 
     let response = params
@@ -520,85 +528,108 @@ async fn handle_callback_respond(
         return JsonRpcResponse::err(request.id.clone(), -32000, "Discord not connected");
     };
 
-    // Reply format only when the user replied to a bot message;
-    // mention-triggered messages get a normal (non-reply) response.
-    let mut send_args = json!({
-        "channel_id": ctx_channel_id,
-        "content": response,
-    });
-    if ctx_is_reply {
-        send_args
-            .as_object_mut()
-            .unwrap()
-            .insert("reply_to".into(), json!(ctx_message_id));
-    }
-
-    // Dummy bot_context (not needed for send_message)
-    let dummy_ctx: BotContext = Arc::new(std::sync::Mutex::new(None));
-
-    let result = match tools::execute("send_message", &send_args, http, config, &dummy_ctx, rate_limiter).await {
-        Ok(_) => {
-            bridge_stats
-                .messages_sent
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // Add completion reaction
-            if channel_id > 0 && message_id > 0 {
-                let emoji = serenity::ReactionType::Unicode(config.reaction_done.clone());
-                let _ = http
-                    .create_reaction(
-                        serenity::ChannelId::new(channel_id),
-                        serenity::MessageId::new(message_id),
-                        &emoji,
+    let result = match ctx_response_mode {
+        ResponseMode::Interaction { token } => {
+            // Edit the deferred interaction response
+            let edit = serenity::EditInteractionResponse::new().content(response);
+            match http.edit_original_interaction_response(&token, &edit, vec![]).await {
+                Ok(_) => {
+                    bridge_stats
+                        .messages_sent
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!(
+                        callback_id = %callback_id,
+                        "Interaction response sent"
+                    );
+                    JsonRpcResponse::ok(
+                        request.id.clone(),
+                        json!({"status": "sent", "callback_id": callback_id, "channel_id": ctx_channel_id, "mode": "interaction"}),
                     )
-                    .await;
-                // Remove processing reaction
-                let processing_emoji =
-                    serenity::ReactionType::Unicode(config.reaction_processing.clone());
-                let _ = http
-                    .delete_reaction_me(
-                        serenity::ChannelId::new(channel_id),
-                        serenity::MessageId::new(message_id),
-                        &processing_emoji,
+                }
+                Err(e) => {
+                    bridge_stats
+                        .errors
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::error!(callback_id = %callback_id, error = %e, "Failed to edit interaction response");
+                    JsonRpcResponse::err(
+                        request.id.clone(),
+                        -32000,
+                        format!("Interaction edit failed: {e}"),
                     )
-                    .await;
+                }
             }
-
-            tracing::info!(
-                callback_id = %callback_id,
-                channel_id = %ctx_channel_id,
-                "Callback response sent to Discord"
-            );
-            JsonRpcResponse::ok(
-                request.id.clone(),
-                json!({"status": "sent", "callback_id": callback_id, "channel_id": ctx_channel_id}),
-            )
         }
-        Err(e) => {
-            bridge_stats
-                .errors
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // Add error reaction
-            if channel_id > 0 && message_id > 0 {
-                let emoji = serenity::ReactionType::Unicode(config.reaction_error.clone());
-                let _ = http
-                    .create_reaction(
-                        serenity::ChannelId::new(channel_id),
-                        serenity::MessageId::new(message_id),
-                        &emoji,
-                    )
-                    .await;
+        ResponseMode::Message { is_reply } => {
+            // Regular channel message
+            let mut send_args = json!({
+                "channel_id": ctx_channel_id,
+                "content": response,
+            });
+            if is_reply {
+                send_args
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("reply_to".into(), json!(ctx_message_id));
             }
 
-            tracing::error!(
-                callback_id = %callback_id,
-                error = %e,
-                "Failed to send callback response to Discord"
-            );
-            JsonRpcResponse::err(
-                request.id.clone(),
-                -32000,
-                format!("Discord send failed: {e}"),
-            )
+            let dummy_ctx: BotContext = Arc::new(std::sync::Mutex::new(None));
+            match tools::execute("send_message", &send_args, http, config, &dummy_ctx, rate_limiter).await {
+                Ok(_) => {
+                    bridge_stats
+                        .messages_sent
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if channel_id > 0 && message_id > 0 {
+                        let emoji = serenity::ReactionType::Unicode(config.reaction_done.clone());
+                        let _ = http
+                            .create_reaction(
+                                serenity::ChannelId::new(channel_id),
+                                serenity::MessageId::new(message_id),
+                                &emoji,
+                            )
+                            .await;
+                        let processing_emoji =
+                            serenity::ReactionType::Unicode(config.reaction_processing.clone());
+                        let _ = http
+                            .delete_reaction_me(
+                                serenity::ChannelId::new(channel_id),
+                                serenity::MessageId::new(message_id),
+                                &processing_emoji,
+                            )
+                            .await;
+                    }
+
+                    tracing::info!(
+                        callback_id = %callback_id,
+                        channel_id = %ctx_channel_id,
+                        "Callback response sent to Discord"
+                    );
+                    JsonRpcResponse::ok(
+                        request.id.clone(),
+                        json!({"status": "sent", "callback_id": callback_id, "channel_id": ctx_channel_id}),
+                    )
+                }
+                Err(e) => {
+                    bridge_stats
+                        .errors
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if channel_id > 0 && message_id > 0 {
+                        let emoji = serenity::ReactionType::Unicode(config.reaction_error.clone());
+                        let _ = http
+                            .create_reaction(
+                                serenity::ChannelId::new(channel_id),
+                                serenity::MessageId::new(message_id),
+                                &emoji,
+                            )
+                            .await;
+                    }
+                    tracing::error!(callback_id = %callback_id, error = %e, "Failed to send callback response");
+                    JsonRpcResponse::err(
+                        request.id.clone(),
+                        -32000,
+                        format!("Discord send failed: {e}"),
+                    )
+                }
+            }
         }
     };
 
@@ -776,6 +807,7 @@ async fn handle_discord_event(
                     author_name: msg.author_name.clone(),
                     author_id: msg.author_id.clone(),
                     is_reply: msg.reference.is_some(),
+                    interaction_token: None,
                     notification_payload,
                     enqueued_at: std::time::Instant::now(),
                 };
@@ -823,7 +855,9 @@ async fn handle_discord_event(
                                 guild_id: msg.guild_id.clone(),
                                 message_id: msg.message_id.clone(),
                                 author_name: msg.author_name.clone(),
-                                is_reply: msg.reference.is_some(),
+                                response_mode: ResponseMode::Message {
+                                    is_reply: msg.reference.is_some(),
+                                },
                                 _typing: typing,
                             },
                         );
@@ -917,6 +951,174 @@ async fn handle_discord_event(
                         callback_id = %callback_id,
                         "Queue full — message rejected"
                     );
+                }
+            }
+        }
+        DiscordEvent::InteractionCreate(interaction) => {
+            bridge_stats
+                .messages_received
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            // Handle /status locally
+            if interaction.command_name == "status" {
+                let uptime = bridge_stats.start_time.elapsed().as_secs();
+                let queue_info = message_queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .status();
+                let status_text = format!(
+                    "**Bridge Status**\nUptime: {}s\nMessages: {} recv / {} sent\nErrors: {}\nQueue: {}/{} (active: {})",
+                    uptime,
+                    bridge_stats.messages_received.load(std::sync::atomic::Ordering::Relaxed),
+                    bridge_stats.messages_sent.load(std::sync::atomic::Ordering::Relaxed),
+                    bridge_stats.errors.load(std::sync::atomic::Ordering::Relaxed),
+                    queue_info.waiting,
+                    queue_info.max_size,
+                    queue_info.active,
+                );
+                if let Some(http) = http {
+                    let edit = serenity::EditInteractionResponse::new().content(&status_text);
+                    let _ = http
+                        .edit_original_interaction_response(&interaction.interaction_token, &edit, vec![])
+                        .await;
+                }
+                return;
+            }
+
+            // /chat — route through callback flow
+            if interaction.message.is_empty() {
+                if let Some(http) = http {
+                    let edit = serenity::EditInteractionResponse::new()
+                        .content("メッセージを入力してください。");
+                    let _ = http
+                        .edit_original_interaction_response(&interaction.interaction_token, &edit, vec![])
+                        .await;
+                }
+                return;
+            }
+
+            let author_id: u64 = interaction.author_id.parse().unwrap_or(0);
+            let session_id = format!("{}:{}", interaction.channel_id, interaction.author_id);
+            let callback_id = format!(
+                "discord-{}-{}-{}",
+                interaction.channel_id, interaction.author_id, interaction.interaction_id
+            );
+
+            // Build a MessageData-like structure for build_callback_payload
+            let msg_data = handler::MessageData {
+                guild_id: interaction.guild_id.clone(),
+                guild_name: interaction.guild_name.clone(),
+                channel_id: interaction.channel_id.clone(),
+                message_id: interaction.interaction_id.clone(),
+                author_id: interaction.author_id.clone(),
+                author_name: interaction.author_name.clone(),
+                author_bot: false,
+                author_roles: interaction.author_roles.clone(),
+                content: interaction.message.clone(),
+                timestamp: interaction.timestamp.clone(),
+                attachments: vec![],
+                reference: None,
+                thread_info: None,
+            };
+
+            let notification_payload = build_callback_payload(
+                &callback_id,
+                &session_id,
+                &msg_data,
+                http,
+                config,
+                bot_user_id,
+                author_id,
+            )
+            .await;
+
+            let enqueue_result = {
+                let entry = QueueEntry {
+                    callback_id: callback_id.clone(),
+                    session_id: session_id.clone(),
+                    channel_id: interaction.channel_id.clone(),
+                    original_message_id: interaction.interaction_id.clone(),
+                    waiting_message_id: None,
+                    guild_id: interaction.guild_id.clone(),
+                    author_name: interaction.author_name.clone(),
+                    author_id: interaction.author_id.clone(),
+                    is_reply: false,
+                    interaction_token: Some(interaction.interaction_token.clone()),
+                    notification_payload,
+                    enqueued_at: std::time::Instant::now(),
+                };
+                message_queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .try_enqueue(entry)
+            };
+
+            match enqueue_result {
+                EnqueueResult::ProcessNow => {
+                    // Register pending callback with interaction mode
+                    if let Ok(mut cbs) = pending_callbacks.lock() {
+                        cbs.insert(
+                            callback_id.clone(),
+                            CallbackContext {
+                                channel_id: interaction.channel_id.clone(),
+                                guild_id: interaction.guild_id.clone(),
+                                message_id: interaction.interaction_id.clone(),
+                                author_name: interaction.author_name.clone(),
+                                response_mode: ResponseMode::Interaction {
+                                    token: interaction.interaction_token.clone(),
+                                },
+                                _typing: None, // Interaction shows "thinking..." automatically
+                            },
+                        );
+                    }
+
+                    let payload = build_callback_payload(
+                        &callback_id,
+                        &session_id,
+                        &msg_data,
+                        http,
+                        config,
+                        bot_user_id,
+                        author_id,
+                    )
+                    .await;
+                    let notif = JsonRpcNotification::new(
+                        "notifications/mgp.callback.request",
+                        Some(payload),
+                    );
+                    write_message(stdout, &notif);
+                }
+                EnqueueResult::Queued(position) => {
+                    // Edit the deferred response to show queue position
+                    if let Some(http) = http {
+                        let wait_text = format!(
+                            "⏳ 待機中です（{}番目）。順番が来たら応答します。",
+                            position
+                        );
+                        let edit = serenity::EditInteractionResponse::new().content(&wait_text);
+                        let _ = http
+                            .edit_original_interaction_response(
+                                &interaction.interaction_token,
+                                &edit,
+                                vec![],
+                            )
+                            .await;
+                    }
+                    tracing::info!(callback_id = %callback_id, position, "Interaction queued");
+                }
+                EnqueueResult::Full => {
+                    if let Some(http) = http {
+                        let edit = serenity::EditInteractionResponse::new()
+                            .content("⚠️ 現在キューが満杯です。しばらく待ってからお試しください。");
+                        let _ = http
+                            .edit_original_interaction_response(
+                                &interaction.interaction_token,
+                                &edit,
+                                vec![],
+                            )
+                            .await;
+                    }
+                    tracing::warn!(callback_id = %callback_id, "Queue full — interaction rejected");
                 }
             }
         }
@@ -1210,6 +1412,13 @@ async fn process_next_in_queue(
         }
 
         // Register pending callback
+        let response_mode = if let Some(token) = next.interaction_token.clone() {
+            ResponseMode::Interaction { token }
+        } else {
+            ResponseMode::Message {
+                is_reply: next.is_reply,
+            }
+        };
         if let Ok(mut cbs) = pending_callbacks.lock() {
             cbs.insert(
                 next.callback_id.clone(),
@@ -1218,7 +1427,7 @@ async fn process_next_in_queue(
                     guild_id: next.guild_id.clone(),
                     message_id: next.original_message_id.clone(),
                     author_name: next.author_name.clone(),
-                    is_reply: next.is_reply,
+                    response_mode,
                     _typing: typing,
                 },
             );

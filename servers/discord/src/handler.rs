@@ -14,9 +14,26 @@ use tokio::sync::mpsc;
 #[derive(Debug)]
 pub enum DiscordEvent {
     MessageCreate(Box<MessageData>),
+    InteractionCreate(Box<InteractionData>),
     Ready(ReadyData),
     Resumed,
     ShardStageUpdate { old: String, new: String },
+}
+
+/// Data extracted from a slash command interaction.
+#[derive(Debug)]
+pub struct InteractionData {
+    pub interaction_id: String,
+    pub interaction_token: String,
+    pub guild_id: Option<String>,
+    pub guild_name: Option<String>,
+    pub channel_id: String,
+    pub author_id: String,
+    pub author_name: String,
+    pub author_roles: Vec<String>,
+    pub command_name: String,
+    pub message: String,
+    pub timestamp: String,
 }
 
 #[derive(Debug)]
@@ -190,12 +207,107 @@ impl serenity::EventHandler for DiscordHandler {
             .send(DiscordEvent::MessageCreate(Box::new(data)));
     }
 
+    async fn interaction_create(&self, ctx: serenity::Context, interaction: serenity::Interaction) {
+        let serenity::Interaction::Command(cmd) = interaction else {
+            return;
+        };
+
+        // Channel filter
+        if !self.allowed_channel_ids.is_empty()
+            && !self.allowed_channel_ids.contains(&cmd.channel_id.get())
+        {
+            return;
+        }
+
+        // Extract message from command options
+        let message = cmd
+            .data
+            .options
+            .iter()
+            .find(|o| o.name == "message")
+            .and_then(|o| o.value.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Resolve author info
+        let author_name = cmd
+            .member
+            .as_ref()
+            .and_then(|m| m.nick.clone())
+            .unwrap_or_else(|| cmd.user.name.clone());
+
+        let author_roles = cmd.member.as_ref().map_or_else(Vec::new, |member| {
+            cmd.guild_id
+                .and_then(|gid| ctx.cache.guild(gid))
+                .map_or_else(Vec::new, |guild| {
+                    member
+                        .roles
+                        .iter()
+                        .filter_map(|rid| guild.roles.get(rid).map(|r| r.name.clone()))
+                        .collect()
+                })
+        });
+
+        let guild_name = cmd
+            .guild_id
+            .and_then(|gid| ctx.cache.guild(gid).map(|g| g.name.clone()));
+
+        let data = InteractionData {
+            interaction_id: cmd.id.to_string(),
+            interaction_token: cmd.token.clone(),
+            guild_id: cmd.guild_id.map(|id| id.to_string()),
+            guild_name,
+            channel_id: cmd.channel_id.to_string(),
+            author_id: cmd.user.id.to_string(),
+            author_name,
+            author_roles,
+            command_name: cmd.data.name.clone(),
+            message,
+            timestamp: cmd.id.created_at().to_string(),
+        };
+
+        // Defer the response (shows "thinking..." to the user)
+        let builder = serenity::CreateInteractionResponse::Defer(
+            serenity::CreateInteractionResponseMessage::new(),
+        );
+        if let Err(e) = cmd.create_response(&ctx.http, builder).await {
+            tracing::error!("Failed to defer interaction: {e}");
+            return;
+        }
+
+        let _ = self
+            .event_tx
+            .send(DiscordEvent::InteractionCreate(Box::new(data)));
+    }
+
     async fn ready(&self, ctx: serenity::Context, ready: serenity::Ready) {
         tracing::info!(
             "Discord connected as {} ({})",
             ready.user.name,
             ready.user.id
         );
+
+        // Register slash commands
+        let commands = vec![
+            serenity::CreateCommand::new("chat")
+                .description("Talk to the bot")
+                .add_option(
+                    serenity::CreateCommandOption::new(
+                        serenity::CommandOptionType::String,
+                        "message",
+                        "Your message",
+                    )
+                    .required(true),
+                ),
+            serenity::CreateCommand::new("status")
+                .description("Show bridge status"),
+        ];
+
+        if let Err(e) = serenity::Command::set_global_commands(&ctx.http, commands).await {
+            tracing::error!("Failed to register slash commands: {e}");
+        } else {
+            tracing::info!("Slash commands registered globally");
+        }
 
         // Store context for presence management tool
         if let Ok(mut slot) = self.bot_context.lock() {

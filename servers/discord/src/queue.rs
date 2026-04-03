@@ -38,6 +38,8 @@ pub struct QueueEntry {
     pub author_id: String,
     /// Whether the original was a reply to a bot message.
     pub is_reply: bool,
+    /// Interaction token (Some = slash command, None = message).
+    pub interaction_token: Option<String>,
     /// The notification payload to send when this entry becomes active.
     pub notification_payload: serde_json::Value,
     /// When this entry was enqueued.
@@ -208,6 +210,7 @@ mod tests {
             author_name: "test".to_string(),
             author_id: "1".to_string(),
             is_reply: false,
+            interaction_token: None,
             notification_payload: json!({}),
             enqueued_at: Instant::now(),
         }
