@@ -1,4 +1,4 @@
-"""Tests for CPersona v2.3.2 Memory Confidence Score."""
+"""Tests for CPersona Memory Confidence Score (v2.3.2+, updated for v2.4.4 DECAY_FLOOR=0.3)."""
 
 import sys
 from datetime import datetime, timedelta, timezone
@@ -27,10 +27,14 @@ def test_confidence_high_cos_old():
 
 
 def test_confidence_high_cos_very_old():
-    """High relevance + 6 months → score drops significantly."""
+    """High relevance + 6 months → score drops but DECAY_FLOOR=0.3 prevents extinction."""
     six_months_ago = (datetime.now(timezone.utc) - timedelta(hours=4380)).isoformat()
     result = _compute_confidence(0.60, six_months_ago)
-    assert result["score"] < 0.25
+    # v2.4.4: DECAY_FLOOR raised to 0.3 — old memories decay to floor, not zero
+    # time_decay = max(0.3, 1/(1+4380*0.005)) = 0.3
+    # norm_cos = (0.60-0.20)/(0.75-0.20) ≈ 0.727
+    # score = sqrt(0.727 * 0.3) ≈ 0.467
+    assert 0.40 <= result["score"] <= 0.55
 
 
 def test_confidence_low_cos_new():
@@ -41,10 +45,13 @@ def test_confidence_low_cos_new():
 
 
 def test_confidence_low_cos_old():
-    """Low relevance + 6 months → very low score."""
+    """Low relevance + 6 months → low score, floored by DECAY_FLOOR=0.3."""
     six_months_ago = (datetime.now(timezone.utc) - timedelta(hours=4380)).isoformat()
     result = _compute_confidence(0.25, six_months_ago)
-    assert result["score"] < 0.15
+    # v2.4.4: DECAY_FLOOR=0.3 prevents full extinction
+    # norm_cos = (0.25-0.20)/(0.75-0.20) ≈ 0.091
+    # score = sqrt(0.091 * 0.3) ≈ 0.165
+    assert 0.10 <= result["score"] <= 0.25
 
 
 def test_confidence_no_cosine():
