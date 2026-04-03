@@ -599,8 +599,7 @@ async def get_db() -> aiosqlite.Connection:
         except Exception:
             pass  # Column already exists (fresh DB with updated SCHEMA_SQL)
         await _db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_memories_agent_channel "
-            "ON memories(agent_id, channel, created_at DESC)"
+            "CREATE INDEX IF NOT EXISTS idx_memories_agent_channel ON memories(agent_id, channel, created_at DESC)"
         )
 
     # v2.4.4: Add recall_count + last_recalled_at columns for recall boost
@@ -944,8 +943,12 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
             is_resolved = r.get("_resolved", False)
             rc_data = recall_counts.get(r.get("id", -1), (0, ""))
             r["_confidence_score"] = _compute_confidence(
-                raw_cos, ts, resolved=is_resolved, deep=deep,
-                time_range_hours=time_range_hours, recall_count=rc_data[0],
+                raw_cos,
+                ts,
+                resolved=is_resolved,
+                deep=deep,
+                time_range_hours=time_range_hours,
+                recall_count=rc_data[0],
                 last_recalled_at_str=rc_data[1],
             )["score"]
         results.sort(key=lambda r: r.get("_confidence_score", 0), reverse=True)
@@ -979,8 +982,12 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
             is_resolved = r.get("_resolved", False)
             rc_data = recall_counts.get(r.get("id", -1), (0, ""))
             msg["confidence"] = _compute_confidence(
-                raw_cosine, ts, resolved=is_resolved, deep=deep,
-                time_range_hours=time_range_hours, recall_count=rc_data[0],
+                raw_cosine,
+                ts,
+                resolved=is_resolved,
+                deep=deep,
+                time_range_hours=time_range_hours,
+                recall_count=rc_data[0],
                 last_recalled_at_str=rc_data[1],
             )
         # Remove internal tracking keys
@@ -2545,10 +2552,12 @@ async def do_check_health(agent_id: str = "", fix: bool = False) -> dict:
                 )
 
     # 5. Empty channel
-    count = (await db.execute_fetchall(
-        f"SELECT COUNT(*) FROM memories WHERE channel = '' {agent_clause}",
-        agent_params,
-    ))[0][0]
+    count = (
+        await db.execute_fetchall(
+            f"SELECT COUNT(*) FROM memories WHERE channel = '' {agent_clause}",
+            agent_params,
+        )
+    )[0][0]
     if count > 0:
         issues.append({"type": "empty_channel", "count": count})
         if fix:
@@ -2563,48 +2572,200 @@ async def do_check_health(agent_id: str = "", fix: bool = False) -> dict:
             test_emb = await _embedding_client.embed(["test"])
             if test_emb and test_emb[0]:
                 expected_bytes = len(test_emb[0]) * 4
-                mismatched = (await db.execute_fetchall(
-                    f"""SELECT COUNT(*) FROM memories
+                mismatched = (
+                    await db.execute_fetchall(
+                        f"""SELECT COUNT(*) FROM memories
                         WHERE embedding IS NOT NULL AND length(embedding) != ?
                         {agent_clause}""",
-                    (expected_bytes, *agent_params),
-                ))[0][0]
+                        (expected_bytes, *agent_params),
+                    )
+                )[0][0]
                 if mismatched > 0:
-                    issues.append({
-                        "type": "embedding_dimension_mismatch",
-                        "count": mismatched,
-                        "expected_dim": len(test_emb[0]),
-                    })
+                    issues.append(
+                        {
+                            "type": "embedding_dimension_mismatch",
+                            "count": mismatched,
+                            "expected_dim": len(test_emb[0]),
+                        }
+                    )
         except Exception:
             pass
 
     # 7. Null embeddings
-    null_count = (await db.execute_fetchall(
-        f"SELECT COUNT(*) FROM memories WHERE embedding IS NULL {agent_clause}",
-        agent_params,
-    ))[0][0]
+    null_count = (
+        await db.execute_fetchall(
+            f"SELECT COUNT(*) FROM memories WHERE embedding IS NULL {agent_clause}",
+            agent_params,
+        )
+    )[0][0]
     if null_count > 0:
         issues.append({"type": "null_embedding", "count": null_count})
+
+    # 7b. Null embedding auto-repair (batch limit: 50)
+    if null_count > 0 and fix and _embedding_client:
+        rows = await db.execute_fetchall(
+            f"SELECT id, content FROM memories WHERE embedding IS NULL {agent_clause} LIMIT 50",
+            agent_params,
+        )
+        re_embedded = 0
+        for row_id, content in rows:
+            try:
+                emb = await _embedding_client.embed([content])
+                if emb and emb[0]:
+                    blob = _embedding_client.pack_embedding(emb[0])
+                    await db.execute("UPDATE memories SET embedding = ? WHERE id = ?", (blob, row_id))
+                    re_embedded += 1
+            except Exception:
+                pass
+        if re_embedded > 0:
+            # Annotate the null_embedding issue with repair count
+            for issue in issues:
+                if issue["type"] == "null_embedding":
+                    issue["re_embedded"] = re_embedded
+                    break
+
+    # 8. FTS5 sync verification
+    try:
+        mem_count = (await db.execute_fetchall("SELECT COUNT(*) FROM memories"))[0][0]
+        mem_fts_count = (await db.execute_fetchall("SELECT COUNT(*) FROM memories_fts"))[0][0]
+        if mem_count != mem_fts_count:
+            issues.append({"type": "fts_memories_desync", "memories": mem_count, "fts": mem_fts_count})
+            if fix:
+                await db.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+
+        ep_count = (await db.execute_fetchall("SELECT COUNT(*) FROM episodes"))[0][0]
+        ep_fts_count = (await db.execute_fetchall("SELECT COUNT(*) FROM episodes_fts"))[0][0]
+        if ep_count != ep_fts_count:
+            issues.append({"type": "fts_episodes_desync", "episodes": ep_count, "fts": ep_fts_count})
+            if fix:
+                await db.execute("INSERT INTO episodes_fts(episodes_fts) VALUES('rebuild')")
+    except Exception:
+        pass  # FTS tables may not exist in very old DBs
+
+    # 9. Schema version verification
+    try:
+        db_version = (await db.execute_fetchall("SELECT MAX(version) FROM schema_version"))[0][0]
+        if db_version != SCHEMA_VERSION:
+            issues.append(
+                {
+                    "type": "schema_version_mismatch",
+                    "db_version": db_version,
+                    "expected": SCHEMA_VERSION,
+                }
+            )
+    except Exception:
+        pass
+
+    # 10. JSON validity (source, metadata fields)
+    try:
+        bad_source = (
+            await db.execute_fetchall(
+                f"SELECT COUNT(*) FROM memories WHERE json_valid(source) = 0 {agent_clause}",
+                agent_params,
+            )
+        )[0][0]
+        bad_metadata = (
+            await db.execute_fetchall(
+                f"SELECT COUNT(*) FROM memories WHERE json_valid(metadata) = 0 {agent_clause}",
+                agent_params,
+            )
+        )[0][0]
+        if bad_source + bad_metadata > 0:
+            issues.append(
+                {
+                    "type": "invalid_json",
+                    "bad_source": bad_source,
+                    "bad_metadata": bad_metadata,
+                }
+            )
+            if fix:
+                await db.execute(
+                    f"UPDATE memories SET source = '{{}}' WHERE json_valid(source) = 0 {agent_clause}",
+                    agent_params,
+                )
+                await db.execute(
+                    f"UPDATE memories SET metadata = '{{}}' WHERE json_valid(metadata) = 0 {agent_clause}",
+                    agent_params,
+                )
+    except Exception:
+        pass  # json_valid() requires SQLite 3.38+
+
+    # 11. Timestamp consistency
+    bad_ts = (
+        await db.execute_fetchall(
+            f"SELECT COUNT(*) FROM memories WHERE datetime(timestamp) IS NULL AND timestamp != '' {agent_clause}",
+            agent_params,
+        )
+    )[0][0]
+    if bad_ts > 0:
+        issues.append({"type": "invalid_timestamp", "count": bad_ts})
+        if fix:
+            await db.execute(
+                f"UPDATE memories SET timestamp = created_at WHERE datetime(timestamp) IS NULL AND timestamp != '' {agent_clause}",
+                agent_params,
+            )
+
+    # 12. Stale pending tasks (older than 1 hour)
+    stale_tasks = (
+        await db.execute_fetchall(
+            "SELECT COUNT(*) FROM pending_memory_tasks WHERE created_at < datetime('now', '-1 hour')"
+        )
+    )[0][0]
+    if stale_tasks > 0:
+        issues.append({"type": "stale_pending_tasks", "count": stale_tasks})
+        if fix:
+            await db.execute("DELETE FROM pending_memory_tasks WHERE created_at < datetime('now', '-1 hour')")
+
+    # 13. Missing profiles (agents with memories but no profile)
+    missing = await db.execute_fetchall(
+        """SELECT DISTINCT m.agent_id FROM memories m
+           LEFT JOIN profiles p ON m.agent_id = p.agent_id
+           WHERE p.id IS NULL"""
+    )
+    if missing:
+        agents = [r[0] for r in missing]
+        issues.append({"type": "missing_profile", "count": len(agents), "agents": agents})
 
     if fix:
         await db.commit()
 
-    total = (await db.execute_fetchall(
-        f"SELECT COUNT(*) FROM memories WHERE 1=1 {agent_clause}", agent_params
-    ))[0][0]
+    total = (await db.execute_fetchall(f"SELECT COUNT(*) FROM memories WHERE 1=1 {agent_clause}", agent_params))[0][0]
+
+    # 14. Storage statistics (informational, does not affect healthy status)
+    try:
+        page_info = await db.execute_fetchall("PRAGMA page_count")
+        page_size_info = await db.execute_fetchall("PRAGMA page_size")
+        db_size_bytes = page_info[0][0] * page_size_info[0][0]
+    except Exception:
+        db_size_bytes = 0
+
+    stats = {
+        "db_size_bytes": db_size_bytes,
+        "memories": total,
+        "episodes": (await db.execute_fetchall("SELECT COUNT(*) FROM episodes"))[0][0],
+        "profiles": (await db.execute_fetchall("SELECT COUNT(*) FROM profiles"))[0][0],
+        "pending_tasks": (await db.execute_fetchall("SELECT COUNT(*) FROM pending_memory_tasks"))[0][0],
+    }
+    if agent_id:
+        stats["agent_memories"] = total
+        stats["agent_episodes"] = (
+            await db.execute_fetchall("SELECT COUNT(*) FROM episodes WHERE agent_id = ?", (agent_id,))
+        )[0][0]
 
     return {
         "total_memories": total,
         "issues": issues,
         "healthy": len(issues) == 0,
         "fixed": fix,
+        "stats": stats,
     }
 
 
 registry.auto_tool(
     "check_health",
-    "Check memory database health. Detects contamination (annotations, mentions), "
-    "duplicates, oversized content, embedding mismatches. Set fix=true to auto-repair.",
+    "Check memory database health (15 checks). Detects contamination, duplicates, "
+    "oversized content, embedding issues, FTS desync, invalid JSON/timestamps, "
+    "stale tasks, missing profiles. Returns storage stats. Set fix=true to auto-repair.",
     {
         "type": "object",
         "properties": {

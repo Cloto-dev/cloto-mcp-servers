@@ -207,8 +207,8 @@
       "name": "CPersona Memory",
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.4.4",
-      "changelog": "Dynamic time decay — effective_rate adapts to agent memory time range. New agents use fixed rate (24h guard), established agents get gentler decay curve. DECAY_FLOOR=0.3 prevents old memory extinction.",
+      "version": "2.4.5",
+      "changelog": "Extended check_health to 15 checks: FTS5 sync, schema version, JSON validity, timestamp consistency, stale tasks, null embedding auto-repair, storage stats, missing profiles.",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [
