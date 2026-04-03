@@ -51,6 +51,7 @@ pip install -r requirements.lock
         "CPERSONA_DB_PATH": "/home/yourname/.claude/cpersona.db",
         "CPERSONA_EMBEDDING_MODE": "http",
         "CPERSONA_EMBEDDING_URL": "http://127.0.0.1:8401/embed",
+        "CPERSONA_VECTOR_SEARCH_MODE": "remote",
         "CPERSONA_TASK_QUEUE_ENABLED": "false"
       }
     }
