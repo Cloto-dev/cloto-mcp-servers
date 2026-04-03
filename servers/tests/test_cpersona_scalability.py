@@ -50,7 +50,9 @@ async def test_memories_fts_table_created():
     await db.commit()
 
     # FTS5 should find it
-    rows = await db.execute_fetchall("SELECT rowid FROM memories_fts WHERE memories_fts MATCH '\"Cascading\"'")
+    rows = await db.execute_fetchall(
+        "SELECT rowid FROM memories_fts WHERE memories_fts MATCH '\"Cascading\"'"
+    )
     assert len(rows) == 1
 
     await db.close()
@@ -91,7 +93,9 @@ async def test_memories_fts_delete_sync():
     await db.commit()
 
     # Verify present
-    rows = await db.execute_fetchall("SELECT rowid FROM memories_fts WHERE memories_fts MATCH '\"temporary\"'")
+    rows = await db.execute_fetchall(
+        "SELECT rowid FROM memories_fts WHERE memories_fts MATCH '\"temporary\"'"
+    )
     assert len(rows) == 1
 
     # Delete
@@ -99,7 +103,9 @@ async def test_memories_fts_delete_sync():
     await db.commit()
 
     # Verify removed from FTS
-    rows = await db.execute_fetchall("SELECT rowid FROM memories_fts WHERE memories_fts MATCH '\"temporary\"'")
+    rows = await db.execute_fetchall(
+        "SELECT rowid FROM memories_fts WHERE memories_fts MATCH '\"temporary\"'"
+    )
     assert len(rows) == 0
 
     await db.close()

@@ -125,9 +125,9 @@ def test_quality_gate_unscored_allowed_dense():
 def test_quality_gate_mixed_results():
     """Mixed result types: scored, unscored, profile."""
     results = [
-        {"id": 1, "_confidence_score": 0.8},  # passes
-        {"id": 2, "_confidence_score": 0.1},  # fails
-        {"id": 3, "content": "keyword only"},  # unscored, blocked (count=80 < 100)
+        {"id": 1, "_confidence_score": 0.8},   # passes
+        {"id": 2, "_confidence_score": 0.1},   # fails
+        {"id": 3, "content": "keyword only"},   # unscored, blocked (count=80 < 100)
         {"id": -1, "content": "[Profile]", "source": {"System": "profile"}},  # allowed (count=80 >= 50)
     ]
     filtered = _apply_quality_gate(results, 0.3, memory_count=80)
