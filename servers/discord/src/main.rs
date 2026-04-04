@@ -286,7 +286,12 @@ fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
         json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {
-                "tools": {}
+                "tools": {},
+                "mgp": {
+                    "version": "0.6.0",
+                    "extensions": ["permissions"],
+                    "permissions_required": ["network.outbound"]
+                }
             },
             "serverInfo": {
                 "name": "mgp-discord",
