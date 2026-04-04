@@ -125,22 +125,30 @@ registry.auto_tool(
 )
 
 # ============================================================
-# MGP Capability Declaration
+# MGP Capability Declaration (using MgpCapabilities helper)
 # ============================================================
-# ClotoCore reads the `mgp` object from the initialize response.
-# This is handled by overriding the server's initialization options.
+# The MgpCapabilities builder provides a lightweight way to declare
+# MGP capabilities without manually constructing JSON.
 #
-# For servers using ToolRegistry (which wraps mcp.Server), the MGP
-# capabilities are declared in mcp.toml [servers.mgp] on the kernel
-# side. The server can also self-declare in the initialize response
-# by customizing the Server class — see the avatar and discord
-# servers (Rust) for examples.
-#
-# For Python servers, the recommended approach is:
-#   1. Declare permissions in mcp.toml: required_permissions = ["network.outbound"]
-#   2. Set trust_level in mcp.toml: [servers.mgp] trust_level = "standard"
+# For Python servers, the recommended dual-declaration approach is:
+#   1. Server-side: use MgpCapabilities (below) for self-declaration
+#   2. Kernel-side: set trust_level in mcp.toml [servers.mgp]
 #
 # The kernel merges both sources (config + server declaration).
+# Config always takes precedence for trust_level.
+#
+# NOTE: A full MGP SDK is not yet available. For advanced features
+# (events, streaming, callbacks), implement JSON-RPC methods directly.
+# See docs/MGP_GUIDE.md for the staged adoption path.
+
+from common.mgp_utils import MgpCapabilities
+
+mgp = MgpCapabilities()
+mgp.require_permission("network.outbound")
+mgp.set_trust_level("standard")
+
+# To apply: merge mgp.as_dict() into your initialize response capabilities.
+# With ToolRegistry, declare in mcp.toml instead (kernel-side declaration).
 
 # ============================================================
 # Entry Point
