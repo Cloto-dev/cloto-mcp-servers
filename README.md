@@ -1,5 +1,8 @@
 # cloto-mcp-servers
 
+[![License](https://img.shields.io/badge/license-BSL%201.1%20%E2%86%92%20MIT%202028-blue)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-117%20passing-brightgreen)]()
+
 MCP server collection for the [ClotoCore](https://github.com/Cloto-dev/ClotoCore) platform.
 
 ## CPersona — AI Memory Server
@@ -115,6 +118,19 @@ Adjust paths to match your environment. For detailed setup instructions, see the
 | `voice.stt` | Voice | Speech-to-text (Whisper) |
 | `output.avatar` | Output | VRM expression, idle behavior, and VOICEVOX TTS (Rust) |
 | `io.discord` | I/O | Bidirectional Discord communication via MGP events (Rust) |
+| `tool.example` | Example | Reference MGP server implementation for new authors |
+
+## MGP Protocol Documentation
+
+ClotoCore extends MCP with [MGP (Multi-Agent Gateway Protocol)](docs/MGP_SPEC.md) —
+a strict superset adding security, lifecycle, and bidirectional communication.
+
+- [MGP Specification](docs/MGP_SPEC.md) — Protocol overview and architecture
+- [MGP Security](docs/MGP_SECURITY.md) — Permission model, RBAC, audit trail
+- [MGP Communication](docs/MGP_COMMUNICATION.md) — Lifecycle, streaming, events
+- [MGP Discovery](docs/MGP_DISCOVERY.md) — Dynamic tool discovery
+- [MGP Guide](docs/MGP_GUIDE.md) — Implementation guide for server authors
+- [MGP Isolation](docs/MGP_ISOLATION_DESIGN.md) — OS-level enforcement design
 
 ## Build Your Own Server
 
