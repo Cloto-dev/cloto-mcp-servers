@@ -249,7 +249,9 @@ fn execute_set_idle_behavior(args: &Value) -> Result<(Value, Vec<JsonRpcNotifica
         .ok_or("agent_id is required")?;
 
     let mut data = json!({ "agent_id": agent_id });
-    let data_obj = data.as_object_mut().unwrap();
+    let data_obj = data
+        .as_object_mut()
+        .expect("json! macro always produces an object");
 
     for key in &[
         "mode",

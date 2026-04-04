@@ -129,7 +129,7 @@ fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
 fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
     let tools: Vec<Value> = tools::tool_list()
         .into_iter()
-        .map(|t| serde_json::to_value(t).unwrap())
+        .filter_map(|t| serde_json::to_value(t).ok())
         .collect();
 
     JsonRpcResponse::ok(

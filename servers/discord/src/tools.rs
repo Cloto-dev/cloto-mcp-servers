@@ -817,7 +817,7 @@ async fn execute_get_history(
         .await
         .map_err(|e| format!("Failed to fetch history: {e}"))?;
 
-    let jst_offset = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
+    let jst_offset = chrono::FixedOffset::east_opt(9 * 3600).expect("JST+9h is always valid");
     let formatted: Vec<String> = messages
         .iter()
         .rev() // oldest first
@@ -865,7 +865,7 @@ async fn execute_search_messages(
     let sort_asc = args.get("sort").and_then(|v| v.as_str()) == Some("asc");
 
     let channel = serenity::ChannelId::new(channel_id);
-    let jst_offset = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
+    let jst_offset = chrono::FixedOffset::east_opt(9 * 3600).expect("JST+9h is always valid");
 
     // Determine starting point
     let target_time = args
@@ -886,8 +886,8 @@ async fn execute_search_messages(
 
         if !collected.is_empty() && collected.len() < scan_limit {
             collected.sort_by_key(|m| m.id);
-            let mut before_cursor = collected.first().unwrap().id;
-            let mut after_cursor = collected.last().unwrap().id;
+            let mut before_cursor = collected.first().expect("checked non-empty above").id;
+            let mut after_cursor = collected.last().expect("checked non-empty above").id;
 
             while collected.len() < scan_limit {
                 let pre_len = collected.len();

@@ -233,9 +233,13 @@ impl serenity::EventHandler for DiscordHandler {
             thread_info,
         };
 
-        let _ = self
+        if self
             .event_tx
-            .send(DiscordEvent::MessageCreate(Box::new(data)));
+            .send(DiscordEvent::MessageCreate(Box::new(data)))
+            .is_err()
+        {
+            tracing::warn!("Failed to send MessageCreate event — receiver dropped");
+        }
     }
 
     async fn interaction_create(&self, ctx: serenity::Context, interaction: serenity::Interaction) {
@@ -255,9 +259,13 @@ impl serenity::EventHandler for DiscordHandler {
                 custom_id: comp.data.custom_id.clone(),
                 values,
             };
-            let _ = self
+            if self
                 .event_tx
-                .send(DiscordEvent::ComponentInteraction(Box::new(data)));
+                .send(DiscordEvent::ComponentInteraction(Box::new(data)))
+                .is_err()
+            {
+                tracing::warn!("Failed to send ComponentInteraction event — receiver dropped");
+            }
             return;
         }
 
@@ -328,9 +336,13 @@ impl serenity::EventHandler for DiscordHandler {
             return;
         }
 
-        let _ = self
+        if self
             .event_tx
-            .send(DiscordEvent::InteractionCreate(Box::new(data)));
+            .send(DiscordEvent::InteractionCreate(Box::new(data)))
+            .is_err()
+        {
+            tracing::warn!("Failed to send InteractionCreate event — receiver dropped");
+        }
     }
 
     async fn ready(&self, ctx: serenity::Context, ready: serenity::Ready) {
@@ -371,12 +383,16 @@ impl serenity::EventHandler for DiscordHandler {
             bot_user_id: ready.user.id.get(),
             guild_count: ready.guilds.len(),
         };
-        let _ = self.event_tx.send(DiscordEvent::Ready(data));
+        if self.event_tx.send(DiscordEvent::Ready(data)).is_err() {
+            tracing::warn!("Failed to send Ready event — receiver dropped");
+        }
     }
 
     async fn resume(&self, _ctx: serenity::Context, _: serenity::ResumedEvent) {
         tracing::info!("Discord Gateway resumed");
-        let _ = self.event_tx.send(DiscordEvent::Resumed);
+        if self.event_tx.send(DiscordEvent::Resumed).is_err() {
+            tracing::warn!("Failed to send Resumed event — receiver dropped");
+        }
     }
 
     async fn shard_stage_update(
@@ -384,9 +400,15 @@ impl serenity::EventHandler for DiscordHandler {
         _ctx: serenity::Context,
         event: serenity::ShardStageUpdateEvent,
     ) {
-        let _ = self.event_tx.send(DiscordEvent::ShardStageUpdate {
-            old: format!("{:?}", event.old),
-            new: format!("{:?}", event.new),
-        });
+        if self
+            .event_tx
+            .send(DiscordEvent::ShardStageUpdate {
+                old: format!("{:?}", event.old),
+                new: format!("{:?}", event.new),
+            })
+            .is_err()
+        {
+            tracing::warn!("Failed to send ShardStageUpdate event — receiver dropped");
+        }
     }
 }
