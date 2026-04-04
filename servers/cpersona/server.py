@@ -145,7 +145,8 @@ class EmbeddingClient:
         """Create persistent HTTP client."""
         import httpx
 
-        self._client = httpx.AsyncClient(timeout=30)
+        timeout = int(os.environ.get("CPERSONA_EMBEDDING_TIMEOUT_SECS", "30"))
+        self._client = httpx.AsyncClient(timeout=timeout)
         logger.info(
             "EmbeddingClient initialized (mode=%s, cache=%d, ttl=%ds)",
             self.mode,
@@ -607,11 +608,11 @@ async def get_db() -> aiosqlite.Connection:
         try:
             await _db.execute("ALTER TABLE memories ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0")
         except Exception:
-            pass
+            pass  # Column already exists
         try:
             await _db.execute("ALTER TABLE memories ADD COLUMN last_recalled_at TEXT")
         except Exception:
-            pass
+            pass  # Column already exists
 
     if current < SCHEMA_VERSION:
         await _db.execute(
@@ -2555,6 +2556,8 @@ async def do_check_health(agent_id: str = "", fix: bool = False) -> dict:
     db = await get_db()
     issues = []
 
+    # agent_clause is always either "" or "AND agent_id = ?" (parameterized).
+    # It is NOT user-controlled — safe for f-string interpolation.
     agent_clause = "AND agent_id = ?" if agent_id else ""
     agent_params = (agent_id,) if agent_id else ()
 
@@ -2648,8 +2651,8 @@ async def do_check_health(agent_id: str = "", fix: bool = False) -> dict:
                             "expected_dim": len(test_emb[0]),
                         }
                     )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Embedding dimension check failed: %s", e)
 
     # 7. Null embeddings
     null_count = (
