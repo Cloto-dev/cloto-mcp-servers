@@ -3,7 +3,7 @@
 **Version:** 0.1.0-draft
 **Status:** Approved Design
 **Date:** 2026-03-05
-**Prerequisite:** MGP_SPEC.md v0.5.3+, ARCHITECTURE.md
+**Prerequisite:** MGP_SPEC.md v0.6.0+, ARCHITECTURE.md
 
 ---
 
@@ -386,6 +386,7 @@ max_child_processes = 3       # Override: needs to spawn git, pip, etc.
 | Variable | Default | Description |
 |---|---|---|
 | `CLOTO_ALLOW_UNSIGNED` | `false` | Skip Magic Seal verification (dev mode) |
+| `CLOTO_YOLO_EXCEPTIONS` | `filesystem.write,network.outbound` | Comma-separated permissions that require approval even in YOLO mode |
 | `CLOTO_DEFAULT_TRUST_LEVEL` | `standard` | Default for servers without explicit trust_level |
 | `CLOTO_ISOLATION_ENABLED` | `true` | Master switch for OS isolation (disable for debugging) |
 | `CLOTO_SANDBOX_DIR` | `data/mcp-sandbox` | Base directory for server sandboxes |

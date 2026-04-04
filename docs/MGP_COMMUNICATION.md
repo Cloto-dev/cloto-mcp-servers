@@ -797,6 +797,20 @@ this via the `truncated` field in the response.
 | 4001 | `subscription_id` does not exist or has been cancelled |
 | 1000 | Caller does not own the subscription |
 
+### 13.8 Event Cascade Depth
+
+Kernels MUST enforce a maximum event cascade depth to prevent infinite loops
+from cascading event handlers. The depth counter increments each time an event
+handler produces a new event.
+
+| Parameter | Default | Range |
+|-----------|---------|-------|
+| `MAX_EVENT_DEPTH` | 10 | 1–25 |
+
+When depth exceeds **5**, kernels SHOULD log a warning to aid debugging.
+When depth reaches `MAX_EVENT_DEPTH`, the event MUST be dropped and an
+error logged.
+
 ---
 
 ## 14. Error Handling

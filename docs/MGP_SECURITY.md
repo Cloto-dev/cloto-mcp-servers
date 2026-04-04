@@ -111,7 +111,7 @@ activate protocol-level behavior.
 > **informational only**. The kernel determines the effective trust level from
 > `mcp.toml` configuration and Magic Seal verification (see MGP_ISOLATION_DESIGN.md
 > §10 Security Invariant 3). If the server-declared value exceeds the
-> kernel-determined level, the kernel silently downgrades it.
+> kernel-determined level, the kernel logs a warning and downgrades it.
 
 ### 2.4 Negotiation Rules
 
@@ -185,9 +185,22 @@ The client applies one of these policies to permission requests:
 | Policy | Behavior |
 |--------|----------|
 | `interactive` | Present each permission to the human operator for approval |
-| `auto_approve` | Automatically approve all permissions (YOLO mode) |
+| `auto_approve` | Automatically approve all permissions (YOLO mode), subject to exception list |
 | `deny_all` | Deny all permissions not pre-configured |
 | `config_only` | Only approve permissions listed in configuration |
+
+**Exception list (auto_approve):** Kernels MAY define a list of permissions excluded
+from auto-approval even in `auto_approve` mode. The ClotoCore kernel defaults to
+`["filesystem.write", "network.outbound"]` via `CLOTO_YOLO_EXCEPTIONS`. Excepted
+permissions follow the `interactive` policy regardless of the configured approval mode.
+
+When a permission in the exception list is requested under `auto_approve` policy,
+the kernel MUST:
+
+1. Partition the permission set into auto-approvable and excepted subsets
+2. Auto-approve the non-excepted permissions immediately
+3. Create pending approval requests for excepted permissions
+4. Block server startup until all excepted permissions are approved
 
 ### 3.4 Permission Request Flow
 
