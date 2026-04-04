@@ -116,6 +116,12 @@ Adjust paths to match your environment. For detailed setup instructions, see the
 | `output.avatar` | Output | VRM expression, idle behavior, and VOICEVOX TTS (Rust) |
 | `io.discord` | I/O | Bidirectional Discord communication via MGP events (Rust) |
 
+## Build Your Own Server
+
+See `servers/example/server.py` for a complete reference implementation, or follow the
+[Quickstart Guide](https://github.com/Cloto-dev/ClotoCore/blob/master/docs/QUICKSTART_MCP_SERVER.md)
+to create a working MCP/MGP server in 5 minutes.
+
 ## Setup (all servers)
 
 ```bash
