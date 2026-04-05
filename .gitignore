@@ -31,6 +31,10 @@ Thumbs.db
 # Rust
 target/
 
+# Dev notes (internal, not for public)
+.dev-notes/
+dev-notes/
+
 # AI assistants
 .claude/
 !.claude/settings.json
