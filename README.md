@@ -10,6 +10,8 @@ MCP server collection for the [ClotoCore](https://github.com/Cloto-dev/ClotoCore
 **CPersona** (`servers/cpersona/`) is an MCP Memory Server that gives Claude persistent memory.
 See the [cpersona README](servers/cpersona/README.md) for full documentation.
 
+> **Standalone users:** For use with Claude Desktop, Claude Code, or other MCP clients without ClotoCore, see the [cpersona standalone repository](https://github.com/Cloto-dev/cpersona).
+
 - 3-layer hybrid search (vector + FTS5 full-text + keyword) with RRF merge
 - Confidence scoring with dynamic time decay, recall boost, and completion factor
 - Episodic memory (conversation summarization) and profile memory (user attributes)
