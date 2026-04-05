@@ -779,9 +779,9 @@ async def _recall_cascade(
                 results.append(row)
                 seen_ids.add(rid)
 
-    # Strategy 2: Profile lookup
+    # Strategy 2: Profile lookup (agent-level only — user_id = '')
     profile_rows = await db.execute_fetchall(
-        "SELECT content FROM profiles WHERE agent_id = ? ORDER BY updated_at DESC LIMIT 3",
+        "SELECT content FROM profiles WHERE agent_id = ? AND user_id = '' ORDER BY updated_at DESC LIMIT 3",
         (agent_id,),
     )
     for (profile_content,) in profile_rows:
@@ -861,9 +861,9 @@ async def _recall_rrf(
         row["_rrf_score"] = rrf_scores[rid]
         results.append(row)
 
-    # --- Profile injection (always, not ranked) ---
+    # --- Profile injection (agent-level only — user_id = '', always, not ranked) ---
     profile_rows = await db.execute_fetchall(
-        "SELECT content FROM profiles WHERE agent_id = ? ORDER BY updated_at DESC LIMIT 3",
+        "SELECT content FROM profiles WHERE agent_id = ? AND user_id = '' ORDER BY updated_at DESC LIMIT 3",
         (agent_id,),
     )
     for (profile_content,) in profile_rows:

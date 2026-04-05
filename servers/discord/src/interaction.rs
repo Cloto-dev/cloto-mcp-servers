@@ -328,6 +328,7 @@ pub async fn build_callback_payload(
                                     json!({
                                         "role": "user",
                                         "name": m.author.name,
+                                        "user_id": m.author.id.get().to_string(),
                                         "content": utils::truncate_str(&m.content, 500),
                                     })
                                 }

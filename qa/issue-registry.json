@@ -58,6 +58,20 @@
         "file": "servers/cpersona/server.py",
         "pattern": "if r\\.get\\(\"msg_id\"\\)"
       }
+    },
+    {
+      "id": "bug-005",
+      "title": "Profile injection in recall queries missing user_id filter — cross-user profile leakage",
+      "severity": "HIGH",
+      "status": "fixed",
+      "file": "servers/cpersona/server.py",
+      "description": "_recall_cascade() and _recall_rrf() query profiles with only agent_id filter (WHERE agent_id = ?), ignoring the user_id column. If per-user profiles exist, any user's recall will inject the most recently updated profile regardless of owner. do_get_profile() correctly uses AND user_id = '' but the recall paths do not.",
+      "expected": "present",
+      "check": {
+        "type": "grep",
+        "file": "servers/cpersona/server.py",
+        "pattern": "profiles WHERE agent_id = \\? AND user_id = '' ORDER BY"
+      }
     }
   ]
 }
