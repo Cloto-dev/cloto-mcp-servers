@@ -207,8 +207,8 @@
       "name": "CPersona Memory",
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.4.8",
-      "changelog": "Responsibility refactoring Phase 1-3: sanitize responsibility normalization (Discord mentions moved to bridge), dedup delegation via exclude_contents, deep_check tool, check_health +3 checks, recall echo chamber penalty, session_id chunk labeling.",
+      "version": "2.4.9",
+      "changelog": "Phase 4: recall_with_context unified API — merges long-term recall with external conversation context (auto-dedup, chronological sort). Phase 1-3: sanitize normalization, exclude_contents, deep_check, check_health +3, recall penalty, session_id chunks.",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [

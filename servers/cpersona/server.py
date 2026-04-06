@@ -1116,6 +1116,66 @@ async def do_recall(
     return {"messages": messages}
 
 
+async def do_recall_with_context(
+    agent_id: str,
+    query: str,
+    external_context: list | None = None,
+    limit: int = 10,
+    channel: str = "",
+    deep: bool = False,
+) -> dict:
+    """Recall memories and merge with external conversation context.
+
+    Combines CPersona long-term recall with short-term conversation history
+    from an I/O bridge (e.g. Discord channel history). Automatically
+    deduplicates (via exclude_contents), converts external_context entries
+    to the same format as recalled memories, and returns a unified
+    chronologically-sorted list.
+    """
+    ctx = external_context or []
+
+    # Auto-build exclude_contents from external_context
+    exclude_list = [e["content"].strip().lower() for e in ctx if e.get("content", "").strip()]
+
+    # Run normal recall with exclusion
+    recall_result = await do_recall(agent_id, query, limit, deep=deep, channel=channel, exclude_contents=exclude_list)
+    messages = recall_result.get("messages", [])
+
+    # Convert external_context entries to the same message format
+    for entry in ctx:
+        role = entry.get("role", "")
+        content = entry.get("content", "").strip()
+        if not content:
+            continue
+
+        if role == "assistant":
+            source = {"type": "Agent", "id": "self"}
+        elif role == "user":
+            name = entry.get("name", "User")
+            user_id = entry.get("user_id", "")
+            uid = f"discord:{user_id}" if user_id else f"discord:{name}"
+            source = {"type": "User", "id": uid, "name": name}
+        else:
+            continue
+
+        messages.append(
+            {
+                "content": content,
+                "source": source,
+                "timestamp": entry.get("timestamp", ""),
+                "context_type": "conversation",
+            }
+        )
+
+    # Sort chronologically (oldest first for LLM context)
+    def _ts_sort_key(m: dict) -> str:
+        return m.get("timestamp", "") or ""
+
+    messages.sort(key=_ts_sort_key)
+
+    return {"messages": messages}
+
+
 async def _search_vector(
     db: aiosqlite.Connection,
     agent_id: str,
@@ -2305,6 +2365,39 @@ registry.auto_tool(
         ("deep", bool, False),
         ("channel", str, ""),
         ("exclude_contents", list, []),
+    ],
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+
+registry.auto_tool(
+    "recall_with_context",
+    "Recall memories and merge with external conversation context. "
+    "Automatically deduplicates, sorts chronologically, and returns a unified list. "
+    "Replaces separate recall + manual merge in the caller.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent ID"},
+            "query": {"type": "string", "description": "Search query"},
+            "external_context": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Conversation history entries [{role, name?, user_id?, content, timestamp?}, ...]",
+            },
+            "limit": {"type": "integer", "description": "Max recalled memories", "default": 10},
+            "channel": {"type": "string", "description": "Memory channel filter"},
+            "deep": {"type": "boolean", "description": "Disable time decay", "default": False},
+        },
+        "required": ["agent_id", "query"],
+    },
+    do_recall_with_context,
+    [
+        ("agent_id", str),
+        ("query", str),
+        ("external_context", list, []),
+        ("limit", int, 10),
+        ("channel", str, ""),
+        ("deep", bool, False),
     ],
     annotations=ToolAnnotations(readOnlyHint=True),
 )
