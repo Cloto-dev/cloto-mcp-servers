@@ -416,7 +416,7 @@ _task_queue: MemoryTaskQueue | None = None
 # Database
 # ============================================================
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -436,6 +436,7 @@ CREATE TABLE IF NOT EXISTS memories (
     channel    TEXT NOT NULL DEFAULT '',
     recall_count INTEGER NOT NULL DEFAULT 0,
     last_recalled_at TEXT,
+    locked     INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -613,6 +614,13 @@ async def get_db() -> aiosqlite.Connection:
             pass  # Column already exists
         try:
             await _db.execute("ALTER TABLE memories ADD COLUMN last_recalled_at TEXT")
+        except Exception:
+            pass  # Column already exists
+
+    # v2.4.10: Add locked column for memory protection
+    if current < 8:
+        try:
+            await _db.execute("ALTER TABLE memories ADD COLUMN locked INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass  # Column already exists
 
@@ -1659,13 +1667,13 @@ async def do_list_memories(agent_id: str, limit: int) -> dict:
     db = await get_db()
     if agent_id:
         rows = await db.execute_fetchall(
-            "SELECT id, agent_id, msg_id, content, source, timestamp, created_at "
+            "SELECT id, agent_id, msg_id, content, source, timestamp, created_at, locked "
             "FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
             (agent_id, _clamp_limit(limit, 500)),
         )
     else:
         rows = await db.execute_fetchall(
-            "SELECT id, agent_id, msg_id, content, source, timestamp, created_at "
+            "SELECT id, agent_id, msg_id, content, source, timestamp, created_at, locked "
             "FROM memories ORDER BY created_at DESC LIMIT ?",
             (_clamp_limit(limit, 500),),
         )
@@ -1684,6 +1692,7 @@ async def do_list_memories(agent_id: str, limit: int) -> dict:
                 "source": source,
                 "timestamp": row[5],
                 "created_at": row[6],
+                "locked": bool(row[7]),
             }
         )
     return {"memories": memories, "count": len(memories)}
@@ -1728,6 +1737,13 @@ async def do_delete_memory(memory_id: int, agent_id: str = "") -> dict:
     deletes unconditionally.
     """
     db = await get_db()
+    # Check lock status before deletion
+    row = await db.execute_fetchone("SELECT locked FROM memories WHERE id = ?", (memory_id,))
+    if row is None:
+        return {"error": f"Memory {memory_id} not found"}
+    if row[0]:
+        return {"error": f"Memory {memory_id} is locked and cannot be deleted"}
+
     if agent_id:
         cursor = await db.execute(
             "DELETE FROM memories WHERE id = ? AND agent_id = ?",
@@ -1752,6 +1768,71 @@ async def do_delete_memory(memory_id: int, agent_id: str = "") -> dict:
             logger.debug("Remote remove failed (non-fatal): %s", e)
 
     return {"ok": True, "deleted_id": memory_id}
+
+
+async def do_update_memory(memory_id: int, content: str, agent_id: str = "") -> dict:
+    """Update memory content by ID. Rejects if memory is locked.
+
+    When agent_id is provided, enforces ownership.
+    """
+    if not content or not content.strip():
+        return {"error": "Content cannot be empty"}
+
+    db = await get_db()
+    row = await db.execute_fetchone("SELECT locked, agent_id FROM memories WHERE id = ?", (memory_id,))
+    if row is None:
+        return {"error": f"Memory {memory_id} not found"}
+    if row[0]:
+        return {"error": f"Memory {memory_id} is locked and cannot be edited"}
+    if agent_id and row[1] != agent_id:
+        return {"error": f"Memory {memory_id} not owned by agent {agent_id}"}
+
+    content = content.strip()
+    await db.execute("UPDATE memories SET content = ? WHERE id = ?", (content, memory_id))
+
+    # Update FTS index
+    if FTS_ENABLED:
+        try:
+            await db.execute("UPDATE memories_fts SET content = ? WHERE rowid = ?", (content, memory_id))
+        except Exception:
+            pass  # FTS update is non-fatal
+
+    await db.commit()
+    return {"ok": True, "updated_id": memory_id}
+
+
+async def do_lock_memory(memory_id: int, agent_id: str = "") -> dict:
+    """Lock a memory to prevent deletion and editing.
+
+    When agent_id is provided, enforces ownership.
+    """
+    db = await get_db()
+    row = await db.execute_fetchone("SELECT agent_id FROM memories WHERE id = ?", (memory_id,))
+    if row is None:
+        return {"error": f"Memory {memory_id} not found"}
+    if agent_id and row[0] != agent_id:
+        return {"error": f"Memory {memory_id} not owned by agent {agent_id}"}
+
+    await db.execute("UPDATE memories SET locked = 1 WHERE id = ?", (memory_id,))
+    await db.commit()
+    return {"ok": True, "locked_id": memory_id}
+
+
+async def do_unlock_memory(memory_id: int, agent_id: str = "") -> dict:
+    """Unlock a memory to allow deletion and editing.
+
+    When agent_id is provided, enforces ownership.
+    """
+    db = await get_db()
+    row = await db.execute_fetchone("SELECT agent_id FROM memories WHERE id = ?", (memory_id,))
+    if row is None:
+        return {"error": f"Memory {memory_id} not found"}
+    if agent_id and row[0] != agent_id:
+        return {"error": f"Memory {memory_id} not owned by agent {agent_id}"}
+
+    await db.execute("UPDATE memories SET locked = 0 WHERE id = ?", (memory_id,))
+    await db.commit()
+    return {"ok": True, "unlocked_id": memory_id}
 
 
 async def do_delete_agent_data(agent_id: str) -> dict:
@@ -2595,6 +2676,55 @@ registry.auto_tool(
     do_delete_episode,
     [("episode_id", int), ("agent_id", str)],
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),
+)
+
+registry.auto_tool(
+    "update_memory",
+    "Update memory content by ID. Rejects if memory is locked. Ownership enforced when agent_id provided.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent ID for ownership verification"},
+            "memory_id": {"type": "integer", "description": "Memory ID to update"},
+            "content": {"type": "string", "description": "New content for the memory"},
+        },
+        "required": ["memory_id", "content"],
+    },
+    do_update_memory,
+    [("memory_id", int), ("content", str), ("agent_id", str)],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+)
+
+registry.auto_tool(
+    "lock_memory",
+    "Lock a memory to prevent deletion and editing. Ownership enforced when agent_id provided.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent ID for ownership verification"},
+            "memory_id": {"type": "integer", "description": "Memory ID to lock"},
+        },
+        "required": ["memory_id"],
+    },
+    do_lock_memory,
+    [("memory_id", int), ("agent_id", str)],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+)
+
+registry.auto_tool(
+    "unlock_memory",
+    "Unlock a memory to allow deletion and editing. Ownership enforced when agent_id provided.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Agent ID for ownership verification"},
+            "memory_id": {"type": "integer", "description": "Memory ID to unlock"},
+        },
+        "required": ["memory_id"],
+    },
+    do_unlock_memory,
+    [("memory_id", int), ("agent_id", str)],
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
 )
 
 registry.auto_tool(

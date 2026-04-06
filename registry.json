@@ -207,8 +207,8 @@
       "name": "CPersona Memory",
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.4.9",
-      "changelog": "Phase 4: recall_with_context unified API — merges long-term recall with external conversation context (auto-dedup, chronological sort). Phase 1-3: sanitize normalization, exclude_contents, deep_check, check_health +3, recall penalty, session_id chunks.",
+      "version": "2.4.10",
+      "changelog": "Memory edit/lock: update_memory, lock_memory, unlock_memory tools. Locked memories reject delete and edit. Schema v8 (locked column). list_memories includes locked field.",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [
