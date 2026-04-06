@@ -32,6 +32,21 @@ pub async fn handle_callback_respond(
         return JsonRpcResponse::err(request.id.clone(), -32602, "callback_id is required");
     }
 
+    // Idempotency check: reject already-processed callbacks
+    {
+        let processed = ctx
+            .processed_callbacks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if processed.contains(callback_id) {
+            tracing::warn!(callback_id = %callback_id, "Duplicate callback response (already processed)");
+            return JsonRpcResponse::ok(
+                request.id.clone(),
+                json!({"status": "already_processed", "callback_id": callback_id}),
+            );
+        }
+    }
+
     // Always remove the callback context first to stop the typing indicator.
     let cb_ctx = ctx
         .pending_callbacks
@@ -252,6 +267,15 @@ pub async fn handle_callback_respond(
             }
         }
     };
+
+    // Mark as processed for idempotency tracking
+    {
+        let mut processed = ctx
+            .processed_callbacks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        processed.mark_processed(callback_id.to_string());
+    }
 
     // Dequeue next item and start processing
     process_next_in_queue(ctx).await;

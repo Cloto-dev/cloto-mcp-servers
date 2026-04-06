@@ -175,6 +175,9 @@ async fn main() {
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
     // Build the shared BridgeContext
+    let chunk_tracker = Arc::new(Mutex::new(bridge::ChunkTracker::new(
+        config.chunk_gap_minutes,
+    )));
     let ctx = BridgeContext {
         http,
         config,
@@ -186,6 +189,8 @@ async fn main() {
         streaming_states,
         stdout,
         bot_user_id,
+        processed_callbacks: Arc::new(Mutex::new(bridge::ProcessedCallbacks::new(200))),
+        chunk_tracker,
     };
 
     // Periodic intervals
@@ -565,7 +570,13 @@ async fn handle_discord_event(ctx: &BridgeContext, event: DiscordEvent) {
             let session_id = if is_thread {
                 format!("{}:shared", msg.channel_id)
             } else {
-                format!("{}:{}", msg.channel_id, msg.author_id)
+                ctx.chunk_tracker
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_session_id(
+                        msg.channel_id.parse().unwrap_or(0),
+                        msg.author_id.parse().unwrap_or(0),
+                    )
             };
             let callback_id = format!(
                 "discord-{}-{}-{}",

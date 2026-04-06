@@ -86,6 +86,8 @@ BOOST_DECAY_RATE = float(os.environ.get("CPERSONA_BOOST_DECAY_RATE", "0.002"))
 MIN_TIME_RANGE_HOURS = float(os.environ.get("CPERSONA_MIN_TIME_RANGE_HOURS", "24"))
 REFERENCE_HOURS = float(os.environ.get("CPERSONA_REFERENCE_HOURS", "168"))  # 1 week
 RESOLVED_DECAY_FACTOR = float(os.environ.get("CPERSONA_RESOLVED_DECAY_FACTOR", "0.3"))
+RECENT_RECALL_PENALTY = float(os.environ.get("CPERSONA_RECENT_RECALL_PENALTY", "0.7"))
+RECENT_RECALL_WINDOW_MIN = float(os.environ.get("CPERSONA_RECENT_RECALL_WINDOW_MIN", "5"))
 TASK_MAX_RETRIES = int(os.environ.get("CPERSONA_TASK_MAX_RETRIES", "3"))
 TASK_RETRY_DELAY = int(os.environ.get("CPERSONA_TASK_RETRY_DELAY", "30"))  # seconds
 
@@ -640,13 +642,29 @@ _MENTION_PATTERN = re.compile(r"<@!?\d+>")
 _MEMORY_ANNOTATION_PATTERN = re.compile(r"\[Memory from [^\]]+\]\s*")
 
 
+def _content_excluded(content: str, exclude_set: set[str]) -> bool:
+    """Check if content matches any excluded string (starts-with, normalized).
+
+    Handles truncation asymmetry: conversation_context entries may be truncated
+    to 500 chars while stored memories can be up to 2000 chars. The starts_with
+    check in both directions accounts for this.
+    """
+    if not exclude_set:
+        return False
+    normalized = content.strip().lower()
+    for excl in exclude_set:
+        if normalized.startswith(excl) or excl.startswith(normalized):
+            return True
+    return False
+
+
 def _sanitize_content(content: str) -> str:
     """Sanitize content before storing in memory.
 
-    Removes Discord bot mentions, [Memory from ...] annotations,
-    trims whitespace, and enforces length limit.
+    Removes [Memory from ...] annotations, trims whitespace, and enforces
+    length limit.  Discord-specific sanitization (mention stripping) is
+    handled by the Discord bridge before content reaches CPersona.
     """
-    content = _MENTION_PATTERN.sub("", content)
     content = _MEMORY_ANNOTATION_PATTERN.sub("", content)
     content = content.strip()
     if len(content) > MAX_CONTENT_LENGTH:
@@ -756,21 +774,23 @@ async def _recall_cascade(
     limit: int,
     deep: bool,
     channel: str = "",
+    exclude_set: set[str] | None = None,
 ) -> list[dict]:
     """Original cascading recall: stages fill remaining slots sequentially."""
     results: list[dict] = []
     seen_ids: set = set()
+    _excl = exclude_set or set()
 
     # Strategy 0: Vector search
     if _embedding_client and query.strip():
         vector_results = await _search_vector(db, agent_id, query, limit, channel=channel)
         for row in vector_results:
             rid = row.get("_rid", row["id"])
-            if rid not in seen_ids:
+            if rid not in seen_ids and not _content_excluded(row["content"], _excl):
                 results.append(row)
                 seen_ids.add(rid)
 
-    # Strategy 1: FTS5 episode search
+    # Strategy 1: FTS5 episode search (episodes are summaries — not excluded)
     if FTS_ENABLED and query.strip():
         fts_results = await _search_episodes_fts(db, agent_id, query, limit)
         for row in fts_results:
@@ -800,7 +820,7 @@ async def _recall_cascade(
         memory_rows = await _search_memories_keyword(db, agent_id, query, remaining, channel=channel)
         for row in memory_rows:
             rid = ("mem", row["id"])
-            if rid not in seen_ids:
+            if rid not in seen_ids and not _content_excluded(row["content"], _excl):
                 results.append(row)
                 seen_ids.add(rid)
 
@@ -814,6 +834,7 @@ async def _recall_rrf(
     limit: int,
     deep: bool,
     channel: str = "",
+    exclude_set: set[str] | None = None,
 ) -> list[dict]:
     """v2.4 RRF recall: run vector and FTS5 independently, merge with
     Reciprocal Rank Fusion. Avoids cascade's positional bias.
@@ -823,6 +844,7 @@ async def _recall_rrf(
     k = RRF_K
     doc_map: dict[tuple, dict] = {}  # rid → row dict
     rrf_scores: dict[tuple, float] = {}  # rid → accumulated RRF score
+    _excl = exclude_set or set()
 
     # --- Retriever 1: Vector search (independent, up to limit) ---
     # Phase 3: RRF mode relaxes the similarity threshold for broader coverage
@@ -830,12 +852,14 @@ async def _recall_rrf(
     if _embedding_client:
         vector_results = await _search_vector(db, agent_id, query, limit, min_similarity=rrf_min_sim, channel=channel)
         for rank, row in enumerate(vector_results):
+            if _content_excluded(row.get("content", ""), _excl):
+                continue
             rid = row.get("_rid", ("mem", row["id"]))
             if rid not in doc_map:
                 doc_map[rid] = row
             rrf_scores[rid] = rrf_scores.get(rid, 0.0) + 1.0 / (k + rank + 1)
 
-    # --- Retriever 2: FTS5 episode search (independent, up to limit) ---
+    # --- Retriever 2: FTS5 episode search (episodes are summaries — not excluded) ---
     if FTS_ENABLED:
         fts_ep_results = await _search_episodes_fts(db, agent_id, query, limit)
         for rank, row in enumerate(fts_ep_results):
@@ -848,6 +872,8 @@ async def _recall_rrf(
     if FTS_ENABLED:
         fts_mem_results = await _search_memories_keyword(db, agent_id, query, limit, channel=channel)
         for rank, row in enumerate(fts_mem_results):
+            if _content_excluded(row.get("content", ""), _excl):
+                continue
             rid = ("mem", row["id"])
             if rid not in doc_map:
                 doc_map[rid] = row
@@ -949,7 +975,14 @@ def _apply_quality_gate(
     return filtered
 
 
-async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, channel: str = "") -> dict:
+async def do_recall(
+    agent_id: str,
+    query: str,
+    limit: int,
+    deep: bool = False,
+    channel: str = "",
+    exclude_contents: list | None = None,
+) -> dict:
     """Recall relevant memories using multi-strategy search.
 
     Supports two modes (CPERSONA_RECALL_MODE):
@@ -957,13 +990,23 @@ async def do_recall(agent_id: str, query: str, limit: int, deep: bool = False, c
     - "rrf" (v2.4): Run vector and FTS5 independently, merge with
       Reciprocal Rank Fusion. Avoids the positional disadvantage of
       cascade ordering.
+
+    ``exclude_contents`` accepts normalized (trimmed, lowercased) content
+    strings.  Memories whose content starts-with any excluded string (or
+    vice-versa) are omitted from results.  This lets the caller prevent
+    duplication with conversation context it already possesses.
     """
     db = await get_db()
 
+    # Build normalized exclusion set
+    exclude_set: set[str] = set()
+    if exclude_contents:
+        exclude_set = {c.strip().lower() for c in exclude_contents if c.strip()}
+
     if RECALL_MODE == "rrf" and query.strip():
-        results = await _recall_rrf(db, agent_id, query, limit, deep, channel)
+        results = await _recall_rrf(db, agent_id, query, limit, deep, channel, exclude_set)
     else:
-        results = await _recall_cascade(db, agent_id, query, limit, deep, channel)
+        results = await _recall_cascade(db, agent_id, query, limit, deep, channel, exclude_set)
 
     # v2.4.4: Compute time range for dynamic decay + fetch recall counts
     time_range_hours = 0.0
@@ -1506,6 +1549,16 @@ def _compute_confidence(
         time_decay = max(effective_floor, 1.0 / (1.0 + age_hours * DECAY_RATE))
     completion_factor = 1.0 if (deep or not resolved) else RESOLVED_DECAY_FACTOR
 
+    # v2.4.7: Short-term recall penalty — suppress memories recalled very recently
+    # to break the echo chamber where frequently-recalled memories dominate.
+    recency_penalty = 1.0
+    if last_recalled_at_str and not deep:
+        lr = _parse_timestamp_utc(last_recalled_at_str)
+        if lr:
+            minutes_since = max(0.0, (now - lr).total_seconds() / 60)
+            if minutes_since < RECENT_RECALL_WINDOW_MIN:
+                recency_penalty = RECENT_RECALL_PENALTY
+
     confidence: dict = {"age_hours": round(age_hours, 1)}
     if resolved:
         confidence["resolved"] = True
@@ -1515,10 +1568,10 @@ def _compute_confidence(
         denom = COSINE_CEIL - COSINE_FLOOR
         norm_cos = max(0.0, min(1.0, (raw_cosine - COSINE_FLOOR) / denom)) if denom > 0 else 0.0
         confidence["cosine"] = round(raw_cosine, 4)
-        confidence["score"] = round(math.sqrt(norm_cos * time_decay) * completion_factor, 4)
+        confidence["score"] = round(math.sqrt(norm_cos * time_decay) * completion_factor * recency_penalty, 4)
     else:
         # Non-vector results: score based on time decay only
-        confidence["score"] = round(math.sqrt(time_decay) * completion_factor, 4)
+        confidence["score"] = round(math.sqrt(time_decay) * completion_factor * recency_penalty, 4)
 
     return confidence
 
@@ -2235,11 +2288,24 @@ registry.auto_tool(
                 "type": "string",
                 "description": "Filter memories by channel (e.g. 'chat', 'discord'). Default: '' (all channels).",
             },
+            "exclude_contents": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Normalized content strings to exclude from results (starts-with match). "
+                "Used to prevent duplication with conversation context already known to the caller.",
+            },
         },
         "required": ["agent_id", "query"],
     },
     do_recall,
-    [("agent_id", str), ("query", str), ("limit", int, 10), ("deep", bool, False), ("channel", str, "")],
+    [
+        ("agent_id", str),
+        ("query", str),
+        ("limit", int, 10),
+        ("deep", bool, False),
+        ("channel", str, ""),
+        ("exclude_contents", list, []),
+    ],
     annotations=ToolAnnotations(readOnlyHint=True),
 )
 
@@ -2573,7 +2639,7 @@ async def do_check_health(agent_id: str = "", fix: bool = False) -> dict:
                 cleaned = _MEMORY_ANNOTATION_PATTERN.sub("", content).strip()
                 await db.execute("UPDATE memories SET content = ? WHERE id = ?", (cleaned, row_id))
 
-    # 2. Discord mentions in content
+    # 2. Discord mentions in content (legacy — new content is pre-sanitized by bridge)
     rows = await db.execute_fetchall(
         f"SELECT id, content FROM memories WHERE content LIKE '%<@%' {agent_clause}",
         agent_params,
@@ -2789,12 +2855,73 @@ async def do_check_health(agent_id: str = "", fix: bool = False) -> dict:
         agents = [r[0] for r in missing]
         issues.append({"type": "missing_profile", "count": len(agents), "agents": agents})
 
+    # 14. Empty or whitespace-only content
+    empty_content = (
+        await db.execute_fetchall(
+            f"SELECT COUNT(*) FROM memories WHERE TRIM(content) = '' OR content IS NULL {agent_clause}",
+            agent_params,
+        )
+    )[0][0]
+    if empty_content > 0:
+        issues.append({"type": "empty_content", "count": empty_content})
+        if fix:
+            await db.execute(
+                f"DELETE FROM memories WHERE (TRIM(content) = '' OR content IS NULL) {agent_clause}",
+                agent_params,
+            )
+
+    # 15. Source structure validation (type field must be User, Agent, or System)
+    try:
+        bad_source_type = (
+            await db.execute_fetchall(
+                f"""SELECT COUNT(*) FROM memories
+                    WHERE (json_extract(source, '$.type') NOT IN ('User', 'Agent', 'System')
+                    OR json_extract(source, '$.type') IS NULL)
+                    {agent_clause}""",
+                agent_params,
+            )
+        )[0][0]
+        if bad_source_type > 0:
+            issues.append({"type": "invalid_source_type", "count": bad_source_type})
+            if fix:
+                await db.execute(
+                    f"""UPDATE memories SET source = '{{"type":"User","id":"","name":""}}'
+                        WHERE (json_extract(source, '$.type') NOT IN ('User', 'Agent', 'System')
+                        OR json_extract(source, '$.type') IS NULL) {agent_clause}""",
+                    agent_params,
+                )
+    except Exception:
+        pass  # json_extract requires SQLite 3.38+
+
+    # 16. Anonymous source (User with empty id and name — data loss from bug-344)
+    try:
+        anon_source = (
+            await db.execute_fetchall(
+                f"""SELECT COUNT(*) FROM memories
+                    WHERE json_extract(source, '$.type') = 'User'
+                    AND json_extract(source, '$.id') = ''
+                    AND json_extract(source, '$.name') = ''
+                    {agent_clause}""",
+                agent_params,
+            )
+        )[0][0]
+        if anon_source > 0:
+            issues.append(
+                {
+                    "type": "anonymous_source",
+                    "count": anon_source,
+                    "hint": "Use deep_check with fix=true to recover names from content",
+                }
+            )
+    except Exception:
+        pass  # json_extract requires SQLite 3.38+
+
     if fix:
         await db.commit()
 
     total = (await db.execute_fetchall(f"SELECT COUNT(*) FROM memories WHERE 1=1 {agent_clause}", agent_params))[0][0]
 
-    # 14. Storage statistics (informational, does not affect healthy status)
+    # Storage statistics (informational, does not affect healthy status)
     try:
         page_info = await db.execute_fetchall("PRAGMA page_count")
         page_size_info = await db.execute_fetchall("PRAGMA page_size")
@@ -2826,9 +2953,10 @@ async def do_check_health(agent_id: str = "", fix: bool = False) -> dict:
 
 registry.auto_tool(
     "check_health",
-    "Check memory database health (15 checks). Detects contamination, duplicates, "
+    "Check memory database health (16 checks). Detects contamination, duplicates, "
     "oversized content, embedding issues, FTS desync, invalid JSON/timestamps, "
-    "stale tasks, missing profiles. Returns storage stats. Set fix=true to auto-repair.",
+    "stale tasks, missing profiles, empty content, invalid/anonymous sources. "
+    "Returns storage stats. Set fix=true to auto-repair.",
     {
         "type": "object",
         "properties": {
@@ -2845,6 +2973,150 @@ registry.auto_tool(
     },
     do_check_health,
     [("agent_id", str, ""), ("fix", bool, False)],
+    annotations=ToolAnnotations(readOnlyHint=False),
+)
+
+# ============================================================
+# Deep Check — semantic / heuristic data quality analysis
+# ============================================================
+
+_USERNAME_PREFIX_PATTERN = re.compile(r"^\[(.+?)\]\s")
+_DEEP_CHECK_ALL = ["anonymous_source", "short_content", "stale_profile", "orphaned_episodes"]
+_SHORT_CONTENT_THRESHOLD = 5
+_STALE_PROFILE_DAYS = 30
+
+
+async def do_deep_check(agent_id: str, fix: bool = False, checks: list | None = None) -> dict:
+    """Deep semantic analysis of memory data quality for a specific agent."""
+    db = await get_db()
+    selected = checks if checks else _DEEP_CHECK_ALL
+    results: dict[str, dict] = {}
+
+    # 1. Anonymous source recovery — extract username from [name] prefix in content
+    if "anonymous_source" in selected:
+        rows = await db.execute_fetchall(
+            """SELECT id, content FROM memories
+               WHERE agent_id = ?
+               AND json_extract(source, '$.type') = 'User'
+               AND json_extract(source, '$.id') = ''
+               AND json_extract(source, '$.name') = ''""",
+            (agent_id,),
+        )
+        recoverable = []
+        unrecoverable = []
+        for row_id, content in rows:
+            match = _USERNAME_PREFIX_PATTERN.match(content)
+            if match:
+                recoverable.append({"id": row_id, "recovered_name": match.group(1)})
+            else:
+                unrecoverable.append({"id": row_id, "content_preview": content[:60]})
+
+        fixed_count = 0
+        if fix and recoverable:
+            for item in recoverable:
+                new_source = json.dumps({"type": "User", "id": "", "name": item["recovered_name"]})
+                await db.execute("UPDATE memories SET source = ? WHERE id = ?", (new_source, item["id"]))
+            fixed_count = len(recoverable)
+
+        result = {"recoverable": len(recoverable), "unrecoverable": len(unrecoverable)}
+        if fix:
+            result["fixed"] = fixed_count
+        if recoverable:
+            result["samples"] = recoverable[:5]
+        if unrecoverable:
+            result["unrecoverable_samples"] = unrecoverable[:5]
+        results["anonymous_source"] = result
+
+    # 2. Short / trivial content — memories too short to be meaningful
+    if "short_content" in selected:
+        rows = await db.execute_fetchall(
+            "SELECT id, content FROM memories WHERE agent_id = ? AND LENGTH(TRIM(content)) <= ?",
+            (agent_id, _SHORT_CONTENT_THRESHOLD),
+        )
+        fixed_count = 0
+        if fix and rows:
+            ids = [r[0] for r in rows]
+            placeholders = ",".join("?" * len(ids))
+            await db.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", ids)
+            fixed_count = len(ids)
+
+        result = {"count": len(rows)}
+        if fix:
+            result["fixed"] = fixed_count
+        if rows:
+            result["samples"] = [{"id": r[0], "content": r[1]} for r in rows[:10]]
+        results["short_content"] = result
+
+    # 3. Stale profile — agent-level profile not updated in N days
+    if "stale_profile" in selected:
+        rows = await db.execute_fetchall(
+            """SELECT id, updated_at FROM profiles
+               WHERE agent_id = ? AND user_id = ''
+               AND updated_at < datetime('now', ?)""",
+            (agent_id, f"-{_STALE_PROFILE_DAYS} days"),
+        )
+        result: dict = {"count": len(rows), "threshold_days": _STALE_PROFILE_DAYS}
+        if rows:
+            result["last_updated"] = rows[0][1]
+        results["stale_profile"] = result
+
+    # 4. Orphaned episodes — episodes whose time range contains no memories
+    if "orphaned_episodes" in selected:
+        rows = await db.execute_fetchall(
+            """SELECT e.id, e.summary, e.start_time, e.end_time FROM episodes e
+               WHERE e.agent_id = ?
+               AND e.start_time IS NOT NULL AND e.end_time IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM memories m
+                   WHERE m.agent_id = e.agent_id
+                   AND m.timestamp >= e.start_time AND m.timestamp <= e.end_time
+               )""",
+            (agent_id,),
+        )
+        result = {"count": len(rows)}
+        if rows:
+            result["samples"] = [{"id": r[0], "summary": r[1][:80], "start": r[2], "end": r[3]} for r in rows[:5]]
+        results["orphaned_episodes"] = result
+
+    if fix:
+        await db.commit()
+
+    return {
+        "agent_id": agent_id,
+        "checks_run": selected,
+        "results": results,
+        "fixed": fix,
+    }
+
+
+registry.auto_tool(
+    "deep_check",
+    "Deep semantic analysis of memory data quality. Detects issues requiring "
+    "heuristic recovery (anonymous sources, short/trivial content, stale profiles, "
+    "orphaned episodes). Set fix=true to apply repairs. Use checks parameter to "
+    "select specific checks.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_id": {
+                "type": "string",
+                "description": "Agent ID to check (required)",
+            },
+            "fix": {
+                "type": "boolean",
+                "description": "Apply repairs (default: dry-run preview only)",
+                "default": False,
+            },
+            "checks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Checks to run (empty = all). Options: anonymous_source, short_content, stale_profile, orphaned_episodes",
+            },
+        },
+        "required": ["agent_id"],
+    },
+    do_deep_check,
+    [("agent_id", str), ("fix", bool, False), ("checks", list, [])],
     annotations=ToolAnnotations(readOnlyHint=False),
 )
 

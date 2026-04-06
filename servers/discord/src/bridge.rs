@@ -66,6 +66,77 @@ pub type BotContext = Arc<std::sync::Mutex<Option<serenity::Context>>>;
 pub type SharedQueue = Arc<Mutex<MessageQueue>>;
 pub type StreamingStates = Arc<tokio::sync::Mutex<HashMap<String, StreamState>>>;
 
+/// Bounded ring buffer tracking recently processed callback IDs for idempotency.
+pub struct ProcessedCallbacks {
+    ids: std::collections::VecDeque<String>,
+    max_size: usize,
+}
+
+impl ProcessedCallbacks {
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            ids: std::collections::VecDeque::with_capacity(max_size),
+            max_size,
+        }
+    }
+
+    /// Returns `true` if newly added, `false` if already processed (duplicate).
+    pub fn mark_processed(&mut self, id: String) -> bool {
+        if self.ids.iter().any(|existing| existing == &id) {
+            return false;
+        }
+        if self.ids.len() >= self.max_size {
+            self.ids.pop_front();
+        }
+        self.ids.push_back(id);
+        true
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.ids.iter().any(|existing| existing == id)
+    }
+}
+
+/// Conversation chunk tracker for session_id generation.
+///
+/// Groups messages into chunks based on time gaps. Within the same
+/// channel:user pair, a new chunk starts when the gap between messages
+/// exceeds `gap_threshold`.  The session_id format is `"{channel}:{user}:{chunk}"`.
+pub struct ChunkTracker {
+    /// "channel:user" → (current_chunk_counter, last_message_at)
+    sessions: HashMap<String, (u32, std::time::Instant)>,
+    gap_threshold: std::time::Duration,
+}
+
+impl ChunkTracker {
+    pub fn new(gap_minutes: u64) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            gap_threshold: std::time::Duration::from_secs(gap_minutes * 60),
+        }
+    }
+
+    /// Return a session_id for the given channel/user, incrementing the chunk
+    /// counter when the time gap since the last message exceeds the threshold.
+    pub fn get_session_id(&mut self, channel: u64, user: u64) -> String {
+        let key = format!("{channel}:{user}");
+        let now = std::time::Instant::now();
+
+        let chunk = if let Some((chunk, last_msg)) = self.sessions.get_mut(&key) {
+            if now.duration_since(*last_msg) > self.gap_threshold {
+                *chunk += 1;
+            }
+            *last_msg = now;
+            *chunk
+        } else {
+            self.sessions.insert(key.clone(), (1, now));
+            1
+        };
+
+        format!("{key}:{chunk}")
+    }
+}
+
 /// Central shared context for the Discord bridge.
 ///
 /// Bundles all shared resources into a single struct so that functions
@@ -81,6 +152,8 @@ pub struct BridgeContext {
     pub streaming_states: StreamingStates,
     pub stdout: Arc<Mutex<io::Stdout>>,
     pub bot_user_id: Arc<std::sync::atomic::AtomicU64>,
+    pub processed_callbacks: Arc<Mutex<ProcessedCallbacks>>,
+    pub chunk_tracker: Arc<Mutex<ChunkTracker>>,
 }
 
 /// Write a JSON-serializable message to stdout (JSON-RPC transport).

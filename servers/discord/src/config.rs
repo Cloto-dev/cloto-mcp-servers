@@ -34,6 +34,8 @@ pub struct DiscordConfig {
     pub queue_timeout_secs: u64,
     /// Reaction emoji for queue waiting state.
     pub reaction_queued: String,
+    /// Gap in minutes before starting a new conversation chunk (default: 30).
+    pub chunk_gap_minutes: u64,
 }
 
 impl DiscordConfig {
@@ -87,6 +89,10 @@ impl DiscordConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(180);
         let reaction_queued = env::var("DISCORD_REACTION_QUEUED").unwrap_or_else(|_| "⏳".into());
+        let chunk_gap_minutes = env::var("DISCORD_CHUNK_GAP_MINUTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
 
         Self {
             bot_token,
@@ -104,6 +110,7 @@ impl DiscordConfig {
             queue_max_size,
             queue_timeout_secs,
             reaction_queued,
+            chunk_gap_minutes,
         }
     }
 

@@ -112,6 +112,41 @@ pub fn sanitize_mentions(text: &str) -> String {
         .replace("@here", "@\u{200b}here")
 }
 
+/// Strip all Discord user/role mentions (`<@ID>`, `<@!ID>`, `<@&ID>`) from content.
+///
+/// Uses manual parsing to avoid adding a `regex` dependency.
+/// Bot mention stripping (`strip_bot_mention`) only removes the bot's own mention;
+/// this function removes ALL mentions so stored memories don't contain raw Discord IDs.
+pub fn strip_all_mentions(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'<' && i + 2 < len && bytes[i + 1] == b'@' {
+            // Potential mention: scan for closing '>'
+            if let Some(rel_end) = content[i..].find('>') {
+                let inner = &content[i + 2..i + rel_end]; // after "<@", before ">"
+                let digits = inner
+                    .trim_start_matches('!')
+                    .trim_start_matches('&');
+                if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                    // Valid mention — skip it entirely
+                    i += rel_end + 1;
+                    continue;
+                }
+            }
+        }
+        // Safe: we only enter this branch for valid UTF-8 char boundaries
+        // because '<' and '@' are single-byte ASCII.
+        let c = content[i..].chars().next().unwrap();
+        result.push(c);
+        i += c.len_utf8();
+    }
+    // Collapse runs of whitespace left by removed mentions
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +219,38 @@ mod tests {
     fn test_parse_direct_command_normal_text() {
         let tools = vec!["get_history"];
         assert!(parse_direct_command("hello world", &tools).is_none());
+    }
+
+    #[test]
+    fn test_strip_all_mentions_user() {
+        assert_eq!(strip_all_mentions("hello <@123456> world"), "hello world");
+    }
+
+    #[test]
+    fn test_strip_all_mentions_nick() {
+        assert_eq!(strip_all_mentions("hello <@!123456> world"), "hello world");
+    }
+
+    #[test]
+    fn test_strip_all_mentions_role() {
+        assert_eq!(strip_all_mentions("hello <@&789> world"), "hello world");
+    }
+
+    #[test]
+    fn test_strip_all_mentions_none() {
+        assert_eq!(strip_all_mentions("no mentions here"), "no mentions here");
+    }
+
+    #[test]
+    fn test_strip_all_mentions_multiple() {
+        assert_eq!(
+            strip_all_mentions("<@111> said hi to <@!222>"),
+            "said hi to"
+        );
+    }
+
+    #[test]
+    fn test_strip_all_mentions_preserves_non_mention_angle() {
+        assert_eq!(strip_all_mentions("a < b > c <@notid>"), "a < b > c <@notid>");
     }
 }

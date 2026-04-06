@@ -72,6 +72,34 @@
         "file": "servers/cpersona/server.py",
         "pattern": "profiles WHERE agent_id = \\? AND user_id = '' ORDER BY"
       }
+    },
+    {
+      "id": "bug-006",
+      "title": "Recall echo chamber — recall_count boost creates positive feedback loop for frequently recalled memories",
+      "severity": "HIGH",
+      "status": "fixed",
+      "file": "servers/cpersona/server.py",
+      "description": "_compute_confidence() uses recall_count to BOOST scores (log(1+count)*RECALL_BOOST), making frequently recalled memories more likely to return. Added RECENT_RECALL_PENALTY: memories recalled within 5 minutes get 0.7x score penalty to break the echo chamber.",
+      "expected": "present",
+      "check": {
+        "type": "grep",
+        "file": "servers/cpersona/server.py",
+        "pattern": "RECENT_RECALL_PENALTY"
+      }
+    },
+    {
+      "id": "bug-007",
+      "title": "No callback idempotency check — duplicate callback responses silently ignored as not_found",
+      "severity": "MEDIUM",
+      "status": "fixed",
+      "file": "servers/discord/src/callback.rs",
+      "description": "handle_callback_respond removes callback from pending_callbacks on first call. Second call gets not_found status silently. Added ProcessedCallbacks ring buffer (200 entries) for explicit idempotency tracking.",
+      "expected": "present",
+      "check": {
+        "type": "grep",
+        "file": "servers/discord/src/callback.rs",
+        "pattern": "already_processed"
+      }
     }
   ]
 }

@@ -59,7 +59,12 @@ pub async fn handle_interaction_create(ctx: &BridgeContext, interaction: Box<Int
     }
 
     let author_id: u64 = interaction.author_id.parse().unwrap_or(0);
-    let session_id = format!("{}:{}", interaction.channel_id, interaction.author_id);
+    let channel_id: u64 = interaction.channel_id.parse().unwrap_or(0);
+    let session_id = ctx
+        .chunk_tracker
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_session_id(channel_id, author_id);
     let callback_id = format!(
         "discord-{}-{}-{}",
         interaction.channel_id, interaction.author_id, interaction.interaction_id
@@ -323,6 +328,7 @@ pub async fn build_callback_payload(
                                     json!({
                                         "role": "assistant",
                                         "content": utils::truncate_str(&m.content, 500),
+                                        "timestamp": m.timestamp.to_string(),
                                     })
                                 } else {
                                     json!({
@@ -330,6 +336,7 @@ pub async fn build_callback_payload(
                                         "name": m.author.name,
                                         "user_id": m.author.id.get().to_string(),
                                         "content": utils::truncate_str(&m.content, 500),
+                                        "timestamp": m.timestamp.to_string(),
                                     })
                                 }
                             })
@@ -358,8 +365,9 @@ pub async fn build_callback_payload(
         vec![]
     };
 
-    // Build message content with author prefix
-    let mut message_content = format!("[{}] {}", msg.author_name, msg.content);
+    // Build message content with author prefix (strip Discord mentions before storage)
+    let clean_content = utils::strip_all_mentions(&msg.content);
+    let mut message_content = format!("[{}] {}", msg.author_name, clean_content);
     let image_attachments: Vec<_> = msg
         .attachments
         .iter()
