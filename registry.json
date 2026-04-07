@@ -244,7 +244,8 @@
       "tags": ["vision", "screenshot", "ocr"],
       "trust_level": "standard",
       "auto_restart": false,
-      "icon": "monitor"
+      "icon": "monitor",
+      "setup_default": false
     },
     {
       "id": "vision.gaze_webcam",
@@ -259,7 +260,8 @@
       "tags": ["vision", "gaze", "webcam"],
       "trust_level": "standard",
       "auto_restart": false,
-      "icon": "eye"
+      "icon": "eye",
+      "setup_default": false
     },
     {
       "id": "voice.stt",
@@ -277,7 +279,8 @@
       "tags": ["voice", "speech", "whisper"],
       "trust_level": "standard",
       "auto_restart": false,
-      "icon": "mic"
+      "icon": "mic",
+      "setup_default": false
     },
     {
       "id": "output.avatar",
