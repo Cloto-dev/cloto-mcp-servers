@@ -3,4 +3,4 @@ name = "cloto-mgp-example"
 version = "0.1.0"
 description = "Example MGP server for ClotoCore — reference implementation for new server authors"
 requires-python = ">=3.10"
-dependencies = ["mcp>=1.0.0"]
+dependencies = ["mcp>=1.0.0,<1.27.0"]

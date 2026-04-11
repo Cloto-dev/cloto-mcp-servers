@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Cloto MCP Server: deterministic utility tools (time, math, UUID, units, encode/decode)"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<1.27.0",
 ]
 
 [build-system]

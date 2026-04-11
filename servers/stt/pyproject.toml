@@ -3,7 +3,7 @@ name = "cloto-mcp-stt"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<1.27.0",
     "faster-whisper>=1.0.0",
 ]
 
