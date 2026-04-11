@@ -77,10 +77,12 @@ impl JsonRpcNotification {
 
 // ── MCP Tool Schema ──
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct McpTool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Value>,
 }

@@ -86,6 +86,7 @@ fn set_expression_schema() -> McpTool {
             },
             "required": ["agent_id", "expression"]
         }),
+        ..Default::default()
     }
 }
 
@@ -114,6 +115,7 @@ fn set_pose_schema() -> McpTool {
             },
             "required": ["agent_id", "pose"]
         }),
+        ..Default::default()
     }
 }
 
@@ -203,6 +205,7 @@ fn set_idle_behavior_schema() -> McpTool {
             },
             "required": ["agent_id"]
         }),
+        ..Default::default()
     }
 }
 
@@ -345,6 +348,7 @@ fn speak_schema() -> McpTool {
             },
             "required": ["text", "agent_id"]
         }),
+        ..Default::default()
     }
 }
 
@@ -370,6 +374,7 @@ fn synthesize_schema() -> McpTool {
             },
             "required": ["text"]
         }),
+        ..Default::default()
     }
 }
 
@@ -381,6 +386,7 @@ fn list_speakers_schema() -> McpTool {
             "type": "object",
             "properties": {}
         }),
+        ..Default::default()
     }
 }
 
@@ -399,6 +405,7 @@ fn set_speaker_schema() -> McpTool {
             },
             "required": ["speaker"]
         }),
+        ..Default::default()
     }
 }
 

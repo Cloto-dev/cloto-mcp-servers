@@ -128,6 +128,7 @@ fn send_message_schema() -> McpTool {
             },
             "required": ["channel_id", "content"]
         }),
+        ..Default::default()
     }
 }
 
@@ -157,6 +158,7 @@ fn send_file_schema() -> McpTool {
             },
             "required": ["channel_id", "file_path"]
         }),
+        ..Default::default()
     }
 }
 
@@ -182,6 +184,7 @@ fn add_reaction_schema() -> McpTool {
             },
             "required": ["channel_id", "message_id", "emoji"]
         }),
+        ..Default::default()
     }
 }
 
@@ -199,6 +202,7 @@ fn list_channels_schema() -> McpTool {
             },
             "required": ["guild_id"]
         }),
+        ..Default::default()
     }
 }
 
@@ -226,6 +230,7 @@ fn get_history_schema() -> McpTool {
             },
             "required": ["channel_id"]
         }),
+        ..Default::default()
     }
 }
 
@@ -262,6 +267,7 @@ fn search_messages_schema() -> McpTool {
             },
             "required": ["channel_id", "query"]
         }),
+        ..Default::default()
     }
 }
 
@@ -287,6 +293,7 @@ fn edit_message_schema() -> McpTool {
             },
             "required": ["channel_id", "message_id", "content"]
         }),
+        ..Default::default()
     }
 }
 
@@ -308,6 +315,7 @@ fn delete_message_schema() -> McpTool {
             },
             "required": ["channel_id", "message_id"]
         }),
+        ..Default::default()
     }
 }
 
@@ -335,6 +343,7 @@ fn set_presence_schema() -> McpTool {
             },
             "required": ["status"]
         }),
+        ..Default::default()
     }
 }
 
@@ -553,6 +562,7 @@ fn send_buttons_schema() -> McpTool {
             },
             "required": ["channel_id", "content"]
         }),
+        ..Default::default()
     }
 }
 
@@ -1119,6 +1129,7 @@ fn list_threads_schema() -> McpTool {
             },
             "required": ["guild_id"]
         }),
+        ..Default::default()
     }
 }
 
@@ -1196,6 +1207,7 @@ fn create_thread_schema() -> McpTool {
             },
             "required": ["channel_id", "name"]
         }),
+        ..Default::default()
     }
 }
 
