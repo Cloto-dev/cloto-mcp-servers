@@ -12,6 +12,8 @@ import unicodedata
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
+from mcp.types import ToolAnnotations
+
 from common.mcp_utils import ToolRegistry, run_mcp_server
 
 # ============================================================
@@ -247,6 +249,7 @@ registry = ToolRegistry("cloto-mcp-terminal")
         },
         "required": ["command"],
     },
+    annotations=ToolAnnotations(destructiveHint=True),
 )
 async def handle_execute(arguments: dict) -> dict:
     command = arguments.get("command")

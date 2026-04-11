@@ -30,15 +30,28 @@ class ToolRegistry:
         self._handlers: dict[str, Callable] = {}
         self._bind()
 
-    def tool(self, name: str, description: str, schema: dict):
+    def tool(
+        self,
+        name: str,
+        description: str,
+        schema: dict,
+        annotations: ToolAnnotations | None = None,
+    ):
         """Decorator: register a tool handler.
 
         The decorated function receives (arguments: dict) and returns a dict.
         JSON serialization and TextContent wrapping are handled automatically.
+
+        *annotations* is forwarded to the MCP Tool schema. The kernel reads
+        ``destructiveHint`` from annotations to trigger the HITL approval
+        gate for destructive tools.
         """
 
         def decorator(fn):
-            self._tools.append(Tool(name=name, description=description, inputSchema=schema))
+            tool_kwargs = {"name": name, "description": description, "inputSchema": schema}
+            if annotations is not None:
+                tool_kwargs["annotations"] = annotations
+            self._tools.append(Tool(**tool_kwargs))
             self._handlers[name] = fn
             return fn
 
