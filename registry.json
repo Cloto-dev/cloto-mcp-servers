@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-03-31T00:00:00Z",
+  "updated_at": "2026-04-12T00:00:00Z",
   "servers": [
     {
       "id": "tool.terminal",
@@ -157,6 +157,24 @@
       "env_vars": [
         { "key": "CEREBRAS_API_URL", "default": "http://127.0.0.1:8082/v1/chat/completions", "description": "LLM proxy endpoint" },
         { "key": "CEREBRAS_PROVIDER", "default": "cerebras", "description": "Provider name for proxy routing" }
+      ],
+      "optional_env_vars": [],
+      "tags": ["engine", "reasoning", "llm", "fast"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "zap"
+    },
+    {
+      "id": "mind.groq",
+      "name": "Groq",
+      "description": "Groq ultra-fast LLM inference (gpt-oss-120b)",
+      "category": "mind",
+      "version": "0.1.0",
+      "directory": "groq",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "GROQ_API_URL", "default": "http://127.0.0.1:8082/v1/chat/completions", "description": "LLM proxy endpoint" },
+        { "key": "GROQ_PROVIDER", "default": "groq", "description": "Provider name for proxy routing" }
       ],
       "optional_env_vars": [],
       "tags": ["engine", "reasoning", "llm", "fast"],
