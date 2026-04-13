@@ -243,8 +243,8 @@
       "name": "CPersona Memory",
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.4.10",
-      "changelog": "Memory edit/lock: update_memory, lock_memory, unlock_memory tools. Locked memories reject delete and edit. Schema v8 (locked column). list_memories includes locked field.",
+      "version": "2.4.11",
+      "changelog": "Hotfix: delete_memory / update_memory / lock_memory / unlock_memory were silently no-ops on aiosqlite 0.22 because of a non-existent `execute_fetchone` call. All four now use `execute_fetchall` so writes actually reach the DB.",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [

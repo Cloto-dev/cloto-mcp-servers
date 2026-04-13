@@ -321,3 +321,90 @@ async def test_get_queue_status_tool():
     server._task_queue = None
     status = await server.do_get_queue_status()
     assert status["enabled"] is False
+
+
+# ============================================================
+# v2.4.11 regression tests: memory write operations must actually
+# reach the database. A prior release silently failed every
+# delete/update/lock/unlock because of a `db.execute_fetchone`
+# call that doesn't exist on aiosqlite 0.22's Connection object —
+# the AttributeError was caught by the outer tool handler and
+# returned as {"error": "..."} wrapped in a success envelope, which
+# callers read as "ok" while the DB row stayed intact.
+# ============================================================
+
+
+async def _insert_memory(agent_id: str, content: str) -> int:
+    db = await server.get_db()
+    cursor = await db.execute(
+        "INSERT INTO memories (agent_id, content, timestamp, source) VALUES (?, ?, ?, ?)",
+        (agent_id, content, "2026-04-13T00:00:00", "test"),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+@pytest.mark.asyncio
+async def test_delete_memory_actually_removes_row():
+    """do_delete_memory must hard-DELETE the row (not silently fail)."""
+    mem_id = await _insert_memory("agent.test", "to be deleted")
+
+    result = await server.do_delete_memory(mem_id, "agent.test")
+    assert result == {"ok": True, "deleted_id": mem_id}
+
+    db = await server.get_db()
+    rows = await db.execute_fetchall("SELECT id FROM memories WHERE id = ?", (mem_id,))
+    assert len(rows) == 0, f"Row {mem_id} still exists after delete_memory"
+
+
+@pytest.mark.asyncio
+async def test_delete_memory_rejects_locked():
+    """Locked memories must be rejected (not silently treated as deleted)."""
+    mem_id = await _insert_memory("agent.test", "locked")
+    db = await server.get_db()
+    await db.execute("UPDATE memories SET locked = 1 WHERE id = ?", (mem_id,))
+    await db.commit()
+
+    result = await server.do_delete_memory(mem_id, "agent.test")
+    assert "error" in result
+    assert "locked" in result["error"].lower()
+
+    rows = await db.execute_fetchall("SELECT id FROM memories WHERE id = ?", (mem_id,))
+    assert len(rows) == 1, "Locked memory should not be deleted"
+
+
+@pytest.mark.asyncio
+async def test_update_memory_actually_writes():
+    mem_id = await _insert_memory("agent.test", "original")
+
+    result = await server.do_update_memory(mem_id, "updated", "agent.test")
+    assert result == {"ok": True, "updated_id": mem_id}
+
+    db = await server.get_db()
+    rows = await db.execute_fetchall("SELECT content FROM memories WHERE id = ?", (mem_id,))
+    assert rows[0][0] == "updated"
+
+
+@pytest.mark.asyncio
+async def test_lock_and_unlock_memory():
+    mem_id = await _insert_memory("agent.test", "lockable")
+
+    lock_result = await server.do_lock_memory(mem_id, "agent.test")
+    assert lock_result == {"ok": True, "locked_id": mem_id}
+
+    db = await server.get_db()
+    rows = await db.execute_fetchall("SELECT locked FROM memories WHERE id = ?", (mem_id,))
+    assert rows[0][0] == 1
+
+    unlock_result = await server.do_unlock_memory(mem_id, "agent.test")
+    assert unlock_result == {"ok": True, "unlocked_id": mem_id}
+
+    rows = await db.execute_fetchall("SELECT locked FROM memories WHERE id = ?", (mem_id,))
+    assert rows[0][0] == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_memory_not_found_returns_error():
+    result = await server.do_delete_memory(999999, "agent.test")
+    assert "error" in result
+    assert "not found" in result["error"].lower()
