@@ -31,7 +31,10 @@ from common.validation import validate_dict, validate_list
 # ============================================================
 
 BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-MODEL_ID = os.environ.get("OLLAMA_MODEL", "glm-4.7-flash")
+# No hardcoded default: users select a model via Dashboard Settings, the
+# switch_model tool, or the OLLAMA_MODEL env var. An empty value produces a
+# clear error on the first inference call instead of 404 for a missing model.
+MODEL_ID = os.environ.get("OLLAMA_MODEL", "")
 REQUEST_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT_SECS", "120"))
 MAX_PREDICT = int(os.environ.get("OLLAMA_MAX_PREDICT", "2048"))
 ENABLE_THINKING = os.environ.get("OLLAMA_ENABLE_THINKING", "false").lower() == "true"
@@ -72,6 +75,12 @@ async def call_ollama_api(messages: list[dict], tools: list[dict] | None = None)
     """Send a request to the Ollama native chat API (/api/chat)."""
     async with _model_lock:
         model = _active_model
+
+    if not model:
+        raise ValueError(
+            "No active Ollama model. Use the switch_model tool to select one, "
+            "set the OLLAMA_MODEL env var, or configure it via Dashboard Settings."
+        )
 
     body: dict = {
         "model": model,
