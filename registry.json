@@ -183,6 +183,24 @@
       "icon": "zap"
     },
     {
+      "id": "mind.local",
+      "name": "Local LLM",
+      "description": "Recommended local LLM provider. OpenAI-compatible wrapper (default target: LM Studio on port 1234; also works with llama.cpp, vLLM, etc.)",
+      "category": "mind",
+      "version": "0.1.0",
+      "directory": "local",
+      "dependencies": ["common"],
+      "env_vars": [
+        { "key": "LOCAL_API_URL", "default": "http://127.0.0.1:8082/v1/chat/completions", "description": "LLM proxy endpoint" },
+        { "key": "LOCAL_PROVIDER", "default": "local", "description": "Provider name for proxy routing" }
+      ],
+      "optional_env_vars": [],
+      "tags": ["engine", "reasoning", "llm", "local", "recommended"],
+      "trust_level": "core",
+      "auto_restart": true,
+      "icon": "cpu"
+    },
+    {
       "id": "mind.claude",
       "name": "Claude",
       "description": "Anthropic Claude integration via native Messages API",
