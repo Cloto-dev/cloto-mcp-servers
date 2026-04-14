@@ -298,7 +298,11 @@ fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
                 "mgp": {
                     "version": "0.6.0",
                     "extensions": ["permissions"],
-                    "permissions_required": ["network.outbound"]
+                    "permissions_required": ["network.outbound"],
+                    // First-party kernel-integral bridge (MGP_ISOLATION_DESIGN §3.1).
+                    // Needs direct HTTPS to discord.com for REST calls — incompatible
+                    // with the HTTPS_PROXY injection applied to Standard-trust servers.
+                    "trust_level": "core"
                 }
             },
             "serverInfo": {
