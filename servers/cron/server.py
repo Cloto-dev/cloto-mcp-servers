@@ -106,7 +106,7 @@ registry = ToolRegistry("cloto-mcp-cron")
                 "description": (
                     "Schedule type: "
                     "'interval' = repeat every N seconds (min 60), "
-                    "'cron' = standard cron expression (e.g. '0 9 * * *'), "
+                    "'cron' = 6-field cron expression with seconds (e.g. '0 0 9 * * *' for 09:00 UTC daily; format: sec min hour day month dow), "
                     "'once' = run once at a specific ISO 8601 datetime"
                 ),
             },
