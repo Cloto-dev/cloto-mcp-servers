@@ -127,9 +127,7 @@ pub fn strip_all_mentions(content: &str) -> String {
             // Potential mention: scan for closing '>'
             if let Some(rel_end) = content[i..].find('>') {
                 let inner = &content[i + 2..i + rel_end]; // after "<@", before ">"
-                let digits = inner
-                    .trim_start_matches('!')
-                    .trim_start_matches('&');
+                let digits = inner.trim_start_matches('!').trim_start_matches('&');
                 if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
                     // Valid mention — skip it entirely
                     i += rel_end + 1;
@@ -251,6 +249,9 @@ mod tests {
 
     #[test]
     fn test_strip_all_mentions_preserves_non_mention_angle() {
-        assert_eq!(strip_all_mentions("a < b > c <@notid>"), "a < b > c <@notid>");
+        assert_eq!(
+            strip_all_mentions("a < b > c <@notid>"),
+            "a < b > c <@notid>"
+        );
     }
 }

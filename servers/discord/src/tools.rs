@@ -13,6 +13,7 @@ use std::sync::Arc;
 /// Build tool schemas for `tools/list`.
 pub fn tool_list() -> Vec<McpTool> {
     vec![
+        list_guilds_schema(),
         send_message_schema(),
         send_buttons_schema(),
         send_file_schema(),
@@ -30,6 +31,7 @@ pub fn tool_list() -> Vec<McpTool> {
 
 /// All bridge-native tool names (used for direct command routing).
 pub const BRIDGE_TOOL_NAMES: &[&str] = &[
+    "list_guilds",
     "send_message",
     "send_buttons",
     "send_file",
@@ -55,6 +57,7 @@ pub async fn execute(
     rate_limiter: &Arc<RateLimiter>,
 ) -> Result<(Value, Vec<JsonRpcNotification>), String> {
     match tool_name {
+        "list_guilds" => execute_list_guilds(http, config).await,
         "send_message" => execute_send_message(args, http, config, rate_limiter).await,
         "send_buttons" => execute_send_buttons(args, http, config, rate_limiter).await,
         "send_file" => execute_send_file(args, http, rate_limiter).await,
@@ -72,6 +75,22 @@ pub async fn execute(
 }
 
 // ── Tool Schemas ──
+
+fn list_guilds_schema() -> McpTool {
+    McpTool {
+        name: "list_guilds".into(),
+        description: "List Discord guilds (servers) the bot is a member of. \
+                      Call this FIRST to discover guild_id values required by \
+                      list_channels, list_threads, and create_thread."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+        ..Default::default()
+    }
+}
 
 fn send_message_schema() -> McpTool {
     McpTool {
@@ -191,13 +210,15 @@ fn add_reaction_schema() -> McpTool {
 fn list_channels_schema() -> McpTool {
     McpTool {
         name: "list_channels".into(),
-        description: "List text channels in a Discord guild.".into(),
+        description: "List text channels in a Discord guild. \
+                      If guild_id is unknown, call list_guilds first to discover it."
+            .into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "guild_id": {
                     "type": "string",
-                    "description": "Discord guild (server) ID"
+                    "description": "Discord guild (server) ID — obtain via list_guilds"
                 }
             },
             "required": ["guild_id"]
@@ -739,6 +760,35 @@ async fn execute_add_reaction(
     Ok((text_result("Reaction added"), vec![]))
 }
 
+async fn execute_list_guilds(
+    http: &Arc<serenity::Http>,
+    config: &crate::config::DiscordConfig,
+) -> Result<(Value, Vec<JsonRpcNotification>), String> {
+    // Discord API caps `/users/@me/guilds` at 200 per request. We don't
+    // paginate here — a bot in 200+ guilds is rare enough that YAGNI wins;
+    // if it ever matters, extend this with GuildPagination::After.
+    let guilds = http
+        .get_guilds(None, Some(200))
+        .await
+        .map_err(|e| format!("Failed to fetch guilds: {e}"))?;
+
+    let filtered: Vec<Value> = guilds
+        .into_iter()
+        .filter(|g| config.is_guild_allowed(g.id.get()))
+        .map(|g| {
+            json!({
+                "id": g.id.to_string(),
+                "name": g.name,
+                "owner": g.owner,
+            })
+        })
+        .collect();
+
+    let text = serde_json::to_string_pretty(&filtered)
+        .map_err(|e| format!("Failed to serialize guilds: {e}"))?;
+    Ok((text_result(text), vec![]))
+}
+
 async fn execute_list_channels(
     args: &Value,
     http: &Arc<serenity::Http>,
@@ -751,10 +801,12 @@ async fn execute_list_channels(
     }
 
     let guild = serenity::GuildId::new(guild_id);
-    let channels = guild
-        .channels(http)
-        .await
-        .map_err(|e| format!("Failed to fetch channels: {e}"))?;
+    let channels = guild.channels(http).await.map_err(|e| {
+        format!(
+            "Failed to fetch channels: {e}. \
+             Call list_guilds to enumerate accessible guild IDs."
+        )
+    })?;
 
     let text_channels: Vec<Value> = channels
         .values()
@@ -1118,13 +1170,15 @@ async fn execute_set_presence(
 fn list_threads_schema() -> McpTool {
     McpTool {
         name: "list_threads".into(),
-        description: "List active threads in a Discord guild.".into(),
+        description: "List active threads in a Discord guild. \
+                      If guild_id is unknown, call list_guilds first to discover it."
+            .into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "guild_id": {
                     "type": "string",
-                    "description": "Discord guild (server) ID"
+                    "description": "Discord guild (server) ID — obtain via list_guilds"
                 }
             },
             "required": ["guild_id"]
@@ -1145,10 +1199,12 @@ async fn execute_list_threads(
     }
 
     let guild = serenity::GuildId::new(guild_id);
-    let threads_data = guild
-        .get_active_threads(http)
-        .await
-        .map_err(|e| format!("Failed to fetch threads: {e}"))?;
+    let threads_data = guild.get_active_threads(http).await.map_err(|e| {
+        format!(
+            "Failed to fetch threads: {e}. \
+             Call list_guilds to enumerate accessible guild IDs."
+        )
+    })?;
 
     let threads: Vec<Value> = threads_data
         .threads
@@ -1265,4 +1321,54 @@ async fn execute_create_thread(
         text_result(serde_json::to_string_pretty(&result).unwrap_or_default()),
         vec![],
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_guilds_schema_has_correct_name_and_no_required_args() {
+        let s = list_guilds_schema();
+        assert_eq!(s.name, "list_guilds");
+        assert!(s.description.to_lowercase().contains("guild"));
+        let required = s
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("required array must exist");
+        assert!(
+            required.is_empty(),
+            "list_guilds must have no required arguments, got: {:?}",
+            required
+        );
+    }
+
+    #[test]
+    fn list_guilds_is_registered_in_tool_list_and_names() {
+        let tools = tool_list();
+        assert!(
+            tools.iter().any(|t| t.name == "list_guilds"),
+            "list_guilds must appear in tool_list()"
+        );
+        assert!(
+            BRIDGE_TOOL_NAMES.contains(&"list_guilds"),
+            "list_guilds must appear in BRIDGE_TOOL_NAMES"
+        );
+    }
+
+    #[test]
+    fn guild_id_taking_tools_mention_list_guilds_in_description() {
+        for schema_fn in [
+            list_channels_schema as fn() -> McpTool,
+            list_threads_schema as fn() -> McpTool,
+        ] {
+            let s = schema_fn();
+            assert!(
+                s.description.to_lowercase().contains("list_guilds"),
+                "{} description must hint at list_guilds for discovery",
+                s.name
+            );
+        }
+    }
 }

@@ -341,8 +341,8 @@
       "name": "Discord Bridge",
       "description": "Bidirectional Discord communication — receive messages via MGP events, send via MCP tools",
       "category": "io",
-      "version": "0.4.5",
-      "changelog": "Responsibility refactoring: strip_all_mentions (Phase 1), callback idempotency (ProcessedCallbacks), ChunkTracker session_id with configurable gap (Phase 3), conversation_context timestamps.",
+      "version": "0.4.6",
+      "changelog": "Added list_guilds tool for agent-driven guild discovery; updated list_channels/list_threads descriptions and error hints to surface the discovery path.",
       "directory": "discord",
       "runtime": "rust",
       "bin_name": "mgp-discord",
@@ -360,7 +360,7 @@
         { "key": "DISCORD_QUEUE_TIMEOUT_SECS", "default": "180", "description": "Timeout in seconds for queued messages" }
       ],
       "tags": ["discord", "bridge", "mgp", "io"],
-      "trust_level": "standard",
+      "trust_level": "core",
       "auto_restart": true,
       "icon": "message-circle"
     }
