@@ -651,6 +651,19 @@ def _error_response(error: Exception) -> list[TextContent]:
     ]
 
 
+def extract_usage(response_data: dict) -> dict | None:
+    """Pull the `usage` block out of an LLM response, if present.
+
+    Returns the raw dict so the kernel can normalize it (it already has to handle
+    both OpenAI `prompt_tokens`/`completion_tokens` and Anthropic `input_tokens`/
+    `output_tokens` for the mind.claude provider). Returns None when the upstream
+    didn't report usage at all, in which case the kernel falls back to its
+    pre-flight estimate.
+    """
+    usage = response_data.get("usage") if isinstance(response_data, dict) else None
+    return usage if isinstance(usage, dict) else None
+
+
 async def handle_think(config: ProviderConfig, arguments: dict) -> list[TextContent]:
     """Handle 'think' tool: simple text generation."""
     try:
@@ -662,7 +675,10 @@ async def handle_think(config: ProviderConfig, arguments: dict) -> list[TextCont
         response_data = await call_llm_api(config, messages)
         content = parse_chat_content(config, response_data)
 
-        return [TextContent(type="text", text=json.dumps({"type": "final", "content": content}))]
+        payload = {"type": "final", "content": content}
+        if (usage := extract_usage(response_data)) is not None:
+            payload["usage"] = usage
+        return [TextContent(type="text", text=json.dumps(payload))]
     except Exception as e:
         return _error_response(e)
 
@@ -696,6 +712,8 @@ async def handle_think_with_tools(config: ProviderConfig, arguments: dict) -> li
 
         response_data = await call_llm_api(config, messages, tools)
         result = parse_chat_think_result(config, response_data)
+        if (usage := extract_usage(response_data)) is not None:
+            result["usage"] = usage
 
         return [TextContent(type="text", text=json.dumps(result))]
     except Exception as e:
