@@ -76,6 +76,21 @@ pub async fn execute(
 
 // ── Tool Schemas ──
 
+/// Read-only tools never modify Discord state. The kernel approval gate
+/// (ClotoCore `command_approval.rs`) treats MCP tools as destructive unless
+/// they carry `readOnlyHint: true`, so discovery / inspection tools MUST
+/// declare it to avoid forcing a user approval prompt on every call.
+fn read_only_hint() -> Option<Value> {
+    Some(json!({ "readOnlyHint": true }))
+}
+
+/// Tools that modify Discord state (send/edit/delete/create). Explicit
+/// `destructiveHint: true` keeps behaviour identical to the pre-annotation
+/// default while documenting intent in a machine-readable way.
+fn destructive_hint() -> Option<Value> {
+    Some(json!({ "destructiveHint": true }))
+}
+
 fn list_guilds_schema() -> McpTool {
     McpTool {
         name: "list_guilds".into(),
@@ -88,7 +103,7 @@ fn list_guilds_schema() -> McpTool {
             "properties": {},
             "required": []
         }),
-        ..Default::default()
+        annotations: read_only_hint(),
     }
 }
 
@@ -147,7 +162,7 @@ fn send_message_schema() -> McpTool {
             },
             "required": ["channel_id", "content"]
         }),
-        ..Default::default()
+        annotations: destructive_hint(),
     }
 }
 
@@ -177,7 +192,7 @@ fn send_file_schema() -> McpTool {
             },
             "required": ["channel_id", "file_path"]
         }),
-        ..Default::default()
+        annotations: destructive_hint(),
     }
 }
 
@@ -203,7 +218,7 @@ fn add_reaction_schema() -> McpTool {
             },
             "required": ["channel_id", "message_id", "emoji"]
         }),
-        ..Default::default()
+        annotations: destructive_hint(),
     }
 }
 
@@ -223,7 +238,7 @@ fn list_channels_schema() -> McpTool {
             },
             "required": ["guild_id"]
         }),
-        ..Default::default()
+        annotations: read_only_hint(),
     }
 }
 
@@ -251,7 +266,7 @@ fn get_history_schema() -> McpTool {
             },
             "required": ["channel_id"]
         }),
-        ..Default::default()
+        annotations: read_only_hint(),
     }
 }
 
@@ -288,7 +303,7 @@ fn search_messages_schema() -> McpTool {
             },
             "required": ["channel_id", "query"]
         }),
-        ..Default::default()
+        annotations: read_only_hint(),
     }
 }
 
@@ -314,7 +329,7 @@ fn edit_message_schema() -> McpTool {
             },
             "required": ["channel_id", "message_id", "content"]
         }),
-        ..Default::default()
+        annotations: destructive_hint(),
     }
 }
 
@@ -336,7 +351,7 @@ fn delete_message_schema() -> McpTool {
             },
             "required": ["channel_id", "message_id"]
         }),
-        ..Default::default()
+        annotations: destructive_hint(),
     }
 }
 
@@ -364,7 +379,7 @@ fn set_presence_schema() -> McpTool {
             },
             "required": ["status"]
         }),
-        ..Default::default()
+        annotations: destructive_hint(),
     }
 }
 
@@ -583,7 +598,7 @@ fn send_buttons_schema() -> McpTool {
             },
             "required": ["channel_id", "content"]
         }),
-        ..Default::default()
+        annotations: destructive_hint(),
     }
 }
 
@@ -1183,7 +1198,7 @@ fn list_threads_schema() -> McpTool {
             },
             "required": ["guild_id"]
         }),
-        ..Default::default()
+        annotations: read_only_hint(),
     }
 }
 
@@ -1263,7 +1278,7 @@ fn create_thread_schema() -> McpTool {
             },
             "required": ["channel_id", "name"]
         }),
-        ..Default::default()
+        annotations: destructive_hint(),
     }
 }
 
@@ -1368,6 +1383,62 @@ mod tests {
                 s.description.to_lowercase().contains("list_guilds"),
                 "{} description must hint at list_guilds for discovery",
                 s.name
+            );
+        }
+    }
+
+    /// Every tool in `tool_list()` must declare an annotations hint so the
+    /// kernel approval gate (which defaults missing-annotations to destructive)
+    /// can classify them correctly. Read-only tools set `readOnlyHint: true`
+    /// and bypass HITL; destructive tools set `destructiveHint: true` and
+    /// require session trust on first call.
+    #[test]
+    fn every_tool_declares_annotations_hint() {
+        for tool in tool_list() {
+            let ann = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} must declare annotations", tool.name));
+            let has_hint = ann.get("readOnlyHint").and_then(|v| v.as_bool()).is_some()
+                || ann
+                    .get("destructiveHint")
+                    .and_then(|v| v.as_bool())
+                    .is_some();
+            assert!(
+                has_hint,
+                "{} annotations must set readOnlyHint or destructiveHint; got: {}",
+                tool.name, ann
+            );
+        }
+    }
+
+    /// Read-only discovery tools must carry `readOnlyHint: true` so the
+    /// kernel approval gate skips HITL — matching the user-visible
+    /// intent that listing guilds/channels/threads/history cannot modify
+    /// Discord state.
+    #[test]
+    fn read_only_tools_have_read_only_hint() {
+        const READ_ONLY: &[&str] = &[
+            "list_guilds",
+            "list_channels",
+            "list_threads",
+            "get_history",
+            "search_messages",
+        ];
+        for tool in tool_list() {
+            if !READ_ONLY.contains(&tool.name.as_str()) {
+                continue;
+            }
+            let flag = tool
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("readOnlyHint"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            assert!(
+                flag,
+                "{} should declare readOnlyHint: true",
+                tool.name
             );
         }
     }
