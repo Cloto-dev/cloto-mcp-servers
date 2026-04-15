@@ -13,7 +13,9 @@ Provides:
 import json
 import os
 import platform
+import re
 import shutil
+import sys
 from dataclasses import dataclass
 
 import httpx
@@ -96,6 +98,7 @@ class ProviderConfig:
     request_timeout: int = 120
     supports_tools: bool = True
     display_name: str = ""
+    reasoning_think_prefill: bool = False
 
     def __post_init__(self):
         if not self.display_name:
@@ -397,6 +400,77 @@ def parse_chat_content(config: ProviderConfig, response_data: dict) -> str:
         raise ValueError(f"Invalid {config.display_name} API response: missing choices[0].message.content: {e}") from e
 
 
+_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)(?:</tool_call>|\Z)", re.DOTALL)
+_FUNCTION_TAG_RE = re.compile(r"<function=([^>\s]+)>")
+_PARAMETER_TAG_RE = re.compile(r"<parameter=([^>\s]+)>(.*?)</parameter>", re.DOTALL)
+_THINK_TAG_RE = re.compile(r"</?think>")
+
+
+def _extract_tool_calls_from_text(text: str) -> list[dict]:
+    """Parse <tool_call>...</tool_call> blocks out of free-form text.
+
+    Handles the emission quirk seen on Qwen3 / DeepSeek-R1 style reasoning models
+    where the model writes tool calls as Hermes-style XML (or OpenAI-style JSON)
+    inside its `<think>` block instead of via the structured `tool_calls[]`
+    channel. Tolerates a trailing unclosed `<tool_call>` (EOS truncation) —
+    returns whatever fully-closed parameters are present and drops partials.
+    """
+    if not text:
+        return []
+    calls: list[dict] = []
+    for idx, match in enumerate(_TOOL_CALL_BLOCK_RE.finditer(text)):
+        body = match.group(1).strip()
+        if not body:
+            continue
+        # OpenAI JSON form: {"name":"...","arguments":{...}}
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and isinstance(parsed.get("name"), str):
+                args = parsed.get("arguments", {})
+                if not isinstance(args, dict):
+                    args = {}
+                calls.append(
+                    {
+                        "id": f"reasoning_fallback_{idx}",
+                        "name": parsed["name"],
+                        "arguments": args,
+                    }
+                )
+                continue
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Hermes XML form: <function=NAME><parameter=KEY>VALUE</parameter>...
+        fn_match = _FUNCTION_TAG_RE.search(body)
+        if not fn_match:
+            continue
+        args = {pm.group(1): pm.group(2).strip() for pm in _PARAMETER_TAG_RE.finditer(body)}
+        calls.append(
+            {
+                "id": f"reasoning_fallback_{idx}",
+                "name": fn_match.group(1),
+                "arguments": args,
+            }
+        )
+    return calls
+
+
+def _strip_reasoning_artifacts(text: str) -> str:
+    """Remove <think>/</think> wrappers and any trailing partial <tool_call>...
+
+    Used as a last-resort surface when the upstream returns only reasoning text
+    and no structured content — guarantees the UI sees *something* rather than
+    an empty bubble, while hiding the XML tool-call trailer that would otherwise
+    leak into the conversation.
+    """
+    if not text:
+        return ""
+    cleaned = _THINK_TAG_RE.sub("", text)
+    tc_idx = cleaned.find("<tool_call>")
+    if tc_idx != -1:
+        cleaned = cleaned[:tc_idx]
+    return cleaned.strip()
+
+
 def parse_chat_think_result(config: ProviderConfig, response_data: dict) -> dict:
     """Parse a chat completions response into a ThinkResult.
 
@@ -434,17 +508,53 @@ def parse_chat_think_result(config: ProviderConfig, response_data: dict) -> dict
                 calls.append({"id": tc_id, "name": name, "arguments": arguments})
 
         if calls:
-            # Prefer content, fall back to reasoning_content (DeepSeek R1 etc.)
-            assistant_content = message_obj.get("content") or message_obj.get("reasoning_content")
+            # Prefer content, fall back to reasoning_content (DeepSeek R1 etc.).
+            # Qwen3 frequently returns `"\n\n"` in content while the real prose
+            # is in reasoning_content — treat whitespace-only as empty so the
+            # fallback kicks in and the kernel doesn't emit a blank-label
+            # thinking step.
+            raw_content = message_obj.get("content") or ""
+            reasoning = message_obj.get("reasoning_content") or ""
+            assistant_content = raw_content if raw_content.strip() else (reasoning or None)
             return {
                 "type": "tool_calls",
                 "assistant_content": assistant_content,
                 "calls": calls,
             }
 
-    content = message_obj.get("content", "")
-    if content is None:
-        content = ""
+    raw_content = message_obj.get("content") or ""
+    reasoning = message_obj.get("reasoning_content") or ""
+
+    # P1: Reasoning-model quirk — tool calls emitted as XML/JSON text inside
+    # <think>. Harvest them so the agentic loop can proceed normally.
+    fallback_calls = _extract_tool_calls_from_text(reasoning)
+    if not fallback_calls:
+        fallback_calls = _extract_tool_calls_from_text(raw_content)
+    if fallback_calls:
+        return {
+            "type": "tool_calls",
+            "assistant_content": raw_content if raw_content.strip() else (reasoning or None),
+            "calls": fallback_calls,
+        }
+
+    # P1.b: Empty content but we have reasoning — surface stripped reasoning so
+    # the UI never shows a blank bubble.
+    content = raw_content
+    if not content and reasoning:
+        content = _strip_reasoning_artifacts(reasoning)
+
+    if not content:
+        try:
+            print(
+                f"[llm_provider] upstream returned empty content "
+                f"provider={config.display_name} finish_reason={finish_reason} "
+                f"reasoning_len={len(reasoning)} usage={response_data.get('usage')}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except OSError:
+            pass
+
     return {"type": "final", "content": content}
 
 
@@ -710,6 +820,12 @@ async def handle_think_with_tools(config: ProviderConfig, arguments: dict) -> li
                     entry = {**entry, "name": safe}
             messages.append(entry)
 
+        # P2: On reasoning models, force-exit the <think> block in iter 2+ via
+        # an assistant prefill. Prevents the Qwen3 / R1 failure mode where the
+        # follow-up tool call is emitted as XML text inside the thinking block.
+        if tool_history and config.reasoning_think_prefill:
+            messages.append({"role": "assistant", "content": "</think>\n\n"})
+
         response_data = await call_llm_api(config, messages, tools)
         result = parse_chat_think_result(config, response_data)
         if (usage := extract_usage(response_data)) is not None:
@@ -742,11 +858,12 @@ def load_llm_provider_config(
     default_model: str = "",
     supports_tools: bool = True,
     default_timeout: int = 120,
+    default_reasoning_prefill: bool = False,
 ) -> ProviderConfig:
     """Load an LLM provider config from environment variables.
 
     Environment variables: {PREFIX}_PROVIDER, {PREFIX}_MODEL,
-    {PREFIX}_API_URL, {PREFIX}_TIMEOUT_SECS.
+    {PREFIX}_API_URL, {PREFIX}_TIMEOUT_SECS, {PREFIX}_REASONING_PREFILL.
 
     MGP §8-10 Proxy-Only Architecture:
     When running under OS-level isolation (NetworkScope::ProxyOnly), the kernel
@@ -777,6 +894,14 @@ def load_llm_provider_config(
             api_url,
         )
 
+    prefill_env = os.environ.get(f"{prefix}_REASONING_PREFILL", "").strip().lower()
+    if prefill_env in ("true", "1", "yes", "on"):
+        reasoning_prefill = True
+    elif prefill_env in ("false", "0", "no", "off"):
+        reasoning_prefill = False
+    else:
+        reasoning_prefill = default_reasoning_prefill
+
     return ProviderConfig(
         provider_id=os.environ.get(f"{prefix}_PROVIDER", prefix.lower()),
         model_id=os.environ.get(f"{prefix}_MODEL", default_model),
@@ -784,6 +909,7 @@ def load_llm_provider_config(
         request_timeout=int(os.environ.get(f"{prefix}_TIMEOUT_SECS", str(default_timeout))),
         supports_tools=supports_tools,
         display_name=display_name,
+        reasoning_think_prefill=reasoning_prefill,
     )
 
 

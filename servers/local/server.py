@@ -21,6 +21,10 @@ config = load_llm_provider_config(
     default_model="",
     supports_tools=True,
     default_timeout=120,
+    # LM Studio commonly hosts Qwen3 / DeepSeek-R1 style reasoning models whose
+    # iter-2 tool calls leak into the <think> block. Default on; override via
+    # LOCAL_REASONING_PREFILL=false if a non-reasoning model is loaded.
+    default_reasoning_prefill=True,
 )
 
 server = create_llm_mcp_server(config)
