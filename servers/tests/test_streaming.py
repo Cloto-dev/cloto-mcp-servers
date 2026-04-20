@@ -235,6 +235,32 @@ async def test_streaming_raises_on_http_error(streaming_config):
     assert excinfo.value.status_code == 500
 
 
+@pytest.mark.asyncio
+async def test_streaming_raises_on_truncation_without_done_marker(streaming_config):
+    """Upstream closing the stream without [DONE] must surface as an
+    ``upstream_truncated`` LlmApiError so the handler can flag the result
+    as partial (MGP §12.5 final-authoritative guarantee)."""
+    from common.llm_provider import LlmApiError
+
+    # Two normal chunks followed by EOF (no "data: [DONE]" sentinel).
+    lines = [
+        'data: {"choices":[{"delta":{"content":"partial"}}]}',
+        'data: {"choices":[{"delta":{"content":" response"}}]}',
+    ]
+    response = _MockStreamResponse(200, lines)
+    client = _MockAsyncClient(response)
+
+    collected: list[dict] = []
+    with patch("common.llm_provider.httpx.AsyncClient", return_value=client):
+        with pytest.raises(LlmApiError) as excinfo:
+            async for chunk in call_llm_api_streaming(streaming_config, []):
+                collected.append(chunk)
+
+    # Chunks emitted before truncation are preserved for the caller.
+    assert len(collected) == 2
+    assert excinfo.value.code == "upstream_truncated"
+
+
 # ---------------------------------------------------------------------------
 # _extract_stream_flag: opt-in detection via params._mgp.stream
 # ---------------------------------------------------------------------------

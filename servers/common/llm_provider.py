@@ -769,6 +769,7 @@ async def call_llm_api_streaming(
                         code = "unknown"
                     raise LlmApiError(msg, code, response.status_code)
 
+                done_received = False
                 async for raw_line in response.aiter_lines():
                     line = raw_line.strip()
                     if not line:
@@ -778,6 +779,7 @@ async def call_llm_api_streaming(
                         continue
                     payload = line[len("data:") :].strip()
                     if payload == "[DONE]":
+                        done_received = True
                         return
                     try:
                         chunk = json.loads(payload)
@@ -785,6 +787,21 @@ async def call_llm_api_streaming(
                         # Ignore malformed lines; upstream sometimes emits blanks
                         continue
                     yield chunk
+
+                # If the upstream closes the stream without emitting the
+                # OpenAI/SSE [DONE] sentinel, the generation was cut off
+                # (network reset, proxy timeout, provider crash, etc.).
+                # Surfacing this as an error lets the streaming handler
+                # flag the response as partial instead of returning the
+                # truncated text as if it were complete (MGP §12.5
+                # final-authoritative guarantee intact: the final result
+                # will carry `_mgp.partial=true`).
+                if not done_received:
+                    raise LlmApiError(
+                        "Upstream closed stream before [DONE] marker "
+                        "(response may be truncated)",
+                        "upstream_truncated",
+                    )
     except httpx.ConnectError:
         raise LlmApiError(
             "Cannot connect to LLM proxy. Ensure the kernel is running.",
