@@ -738,6 +738,11 @@ async def call_llm_api_streaming(
         "model": config.model_id,
         "messages": messages,
         "stream": True,
+        # OpenAI-compatible opt-in for receiving the final `usage` block
+        # during a streaming response. Without this, LM Studio / OpenAI /
+        # vLLM emit chunks but no usage, and downstream features like the
+        # Dashboard's ContextUsageBadge have nothing to render.
+        "stream_options": {"include_usage": True},
     }
 
     if tools and model_supports_tools(config):
