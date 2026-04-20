@@ -187,14 +187,16 @@
       "name": "Local LLM",
       "description": "Recommended local LLM provider. OpenAI-compatible wrapper (default target: LM Studio on port 1234; also works with llama.cpp, vLLM, etc.)",
       "category": "mind",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "directory": "local",
       "dependencies": ["common"],
       "env_vars": [
         { "key": "LOCAL_API_URL", "default": "http://127.0.0.1:8082/v1/chat/completions", "description": "LLM proxy endpoint" },
         { "key": "LOCAL_PROVIDER", "default": "local", "description": "Provider name for proxy routing" }
       ],
-      "optional_env_vars": [],
+      "optional_env_vars": [
+        { "key": "LOCAL_STREAMING", "default": "false", "description": "Opt-in MGP §12 streaming (notifications/mgp.stream.chunk) for think_with_tools. Callers must set _mgp.stream=true on tools/call params." }
+      ],
       "tags": ["engine", "reasoning", "llm", "local", "recommended"],
       "trust_level": "core",
       "auto_restart": true,

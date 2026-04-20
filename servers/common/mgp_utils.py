@@ -10,6 +10,11 @@ See: docs/MGP_SPEC.md, docs/MGP_GUIDE.md
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from mcp.server.session import ServerSession
+
 MGP_VERSION = "0.6.0"
 
 
@@ -84,3 +89,61 @@ class MgpCapabilities:
         if self._server_id:
             mgp["server_id"] = self._server_id
         return {"mgp": mgp}
+
+
+async def send_mgp_stream_chunk(
+    session: "ServerSession",
+    request_id: int | str,
+    index: int,
+    content: dict,
+    done: bool = False,
+    mgp_meta: dict | None = None,
+) -> None:
+    """Emit a ``notifications/mgp.stream.chunk`` (MGP §12.4).
+
+    MGP defines custom JSON-RPC notification methods that are not part of the
+    MCP-standard ``ServerNotificationType`` closed union, so the typed
+    ``session.send_notification()`` helper cannot be used. We construct the
+    ``JSONRPCNotification`` directly and feed it to the session's write stream.
+
+    This is technically reaching into a private attribute (``_write_stream``);
+    if/when the MCP SDK exposes a public API for arbitrary notifications,
+    replace this implementation without changing the call sites.
+
+    Parameters
+    ----------
+    session:
+        ``ServerSession`` instance, obtained via ``server.request_context.session``.
+    request_id:
+        JSON-RPC id of the originating ``tools/call`` — used by the kernel to
+        route the chunk to the correct stream collector (see
+        ``managers/mcp_client.rs::call_tool_streaming``).
+    index:
+        Zero-based monotonically increasing chunk index per request. Used for
+        gap detection (MGP §12.9).
+    content:
+        Chunk payload, typically ``{"type": "text", "text": "..."}``.
+    done:
+        ``True`` only on the final chunk (informational; the authoritative
+        terminator is the ``tools/call`` response itself, MGP §12.5).
+    mgp_meta:
+        Optional ``_mgp`` sub-object for chunk-level metadata.
+    """
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCMessage, JSONRPCNotification
+
+    params: dict[str, Any] = {
+        "request_id": request_id,
+        "index": index,
+        "content": content,
+        "done": done,
+    }
+    if mgp_meta:
+        params["_mgp"] = mgp_meta
+
+    notification = JSONRPCNotification(
+        jsonrpc="2.0",
+        method="notifications/mgp.stream.chunk",
+        params=params,
+    )
+    await session._write_stream.send(SessionMessage(message=JSONRPCMessage(notification)))

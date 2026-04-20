@@ -10,6 +10,7 @@ Provides:
 - Common MCP tool definitions and handlers
 """
 
+import contextvars
 import json
 import os
 import platform
@@ -21,7 +22,15 @@ from dataclasses import dataclass
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent
+from mcp.types import CallToolRequest, TextContent
+
+# Per-request flag set by the CallToolRequest wrapper when the incoming
+# params include ``_mgp.stream: true``. Read from inside the @server.call_tool()
+# handler to branch into the streaming path. Using a ContextVar (vs attributes
+# on the server) because multiple concurrent requests may be in flight.
+_mgp_stream_requested: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "cloto_mgp_stream_requested", default=False
+)
 
 # ============================================================
 # Provider Configuration
@@ -99,6 +108,11 @@ class ProviderConfig:
     supports_tools: bool = True
     display_name: str = ""
     reasoning_think_prefill: bool = False
+    # MGP §12: opt-in streaming. When True and the caller sets `_mgp.stream: true`
+    # on the tools/call params, handle_think_with_tools emits
+    # notifications/mgp.stream.chunk as tokens arrive. Default off to preserve
+    # existing one-shot behavior for non-MGP clients.
+    supports_streaming: bool = False
 
     def __post_init__(self):
         if not self.display_name:
@@ -665,6 +679,84 @@ async def call_llm_api(
     return _restore_tool_names(response.json(), reverse_map)
 
 
+async def call_llm_api_streaming(
+    config: ProviderConfig,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+):
+    """Stream an OpenAI-compatible /v1/chat/completions response chunk-by-chunk.
+
+    Yields parsed SSE chunks (dicts). The terminating ``data: [DONE]`` marker
+    is consumed internally — callers iterate until the generator completes
+    naturally.
+
+    Tool name sanitization (dot → underscore) is applied on the outbound
+    request. The kernel agentic loop already restores dot-names on received
+    tool calls, so no reverse-map is exposed here.
+    """
+    body: dict = {
+        "model": config.model_id,
+        "messages": messages,
+        "stream": True,
+    }
+
+    if tools and model_supports_tools(config):
+        sanitized, _ = _sanitize_tool_names(tools)
+        body["tools"] = sanitized
+
+    try:
+        async with httpx.AsyncClient(timeout=config.request_timeout) as client:
+            async with client.stream(
+                "POST",
+                config.api_url,
+                json=body,
+                headers={
+                    "X-LLM-Provider": config.provider_id,
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+            ) as response:
+                if response.status_code >= 400:
+                    # Drain body to extract proxy error structure
+                    body_bytes = await response.aread()
+                    try:
+                        err_body = json.loads(body_bytes.decode("utf-8", errors="replace"))
+                        err_obj = err_body.get("error", {})
+                        msg = err_obj.get("message", f"HTTP {response.status_code}")
+                        code = err_obj.get("code", "unknown")
+                    except Exception:
+                        msg = f"HTTP {response.status_code}"
+                        code = "unknown"
+                    raise LlmApiError(msg, code, response.status_code)
+
+                async for raw_line in response.aiter_lines():
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    if not line.startswith("data:"):
+                        # Some servers emit comment lines starting with ":" — skip
+                        continue
+                    payload = line[len("data:") :].strip()
+                    if payload == "[DONE]":
+                        return
+                    try:
+                        chunk = json.loads(payload)
+                    except json.JSONDecodeError:
+                        # Ignore malformed lines; upstream sometimes emits blanks
+                        continue
+                    yield chunk
+    except httpx.ConnectError:
+        raise LlmApiError(
+            "Cannot connect to LLM proxy. Ensure the kernel is running.",
+            "connection_failed",
+        )
+    except httpx.TimeoutException:
+        raise LlmApiError(
+            f"LLM request timed out after {config.request_timeout}s.",
+            "timeout",
+        )
+
+
 # ============================================================
 # Common MCP Tool Definitions
 # ============================================================
@@ -793,6 +885,36 @@ async def handle_think(config: ProviderConfig, arguments: dict) -> list[TextCont
         return _error_response(e)
 
 
+def _build_think_with_tools_messages(
+    agent: dict, message: dict, context: list, tools: list, tool_history: list, config: ProviderConfig
+) -> list[dict]:
+    """Build the message array for think_with_tools (shared by sync + streaming paths)."""
+    messages = build_chat_messages(agent, message, context, tools=tools)
+    # Sanitize dot-names in tool_history for LLM API compatibility
+    for entry in tool_history:
+        if "tool_calls" in entry:
+            entry = json.loads(json.dumps(entry))  # deep copy
+            for tc in entry.get("tool_calls", []):
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                safe = name.replace(".", "_")
+                if safe != name:
+                    fn["name"] = safe
+        elif entry.get("role") == "tool" and "name" in entry:
+            name = entry.get("name", "")
+            safe = name.replace(".", "_")
+            if safe != name:
+                entry = {**entry, "name": safe}
+        messages.append(entry)
+
+    # P2: On reasoning models, force-exit the <think> block in iter 2+ via
+    # an assistant prefill. Prevents the Qwen3 / R1 failure mode where the
+    # follow-up tool call is emitted as XML text inside the thinking block.
+    if tool_history and config.reasoning_think_prefill:
+        messages.append({"role": "assistant", "content": "</think>\n\n"})
+    return messages
+
+
 async def handle_think_with_tools(config: ProviderConfig, arguments: dict) -> list[TextContent]:
     """Handle 'think_with_tools' tool: may return tool calls or final text."""
     try:
@@ -802,34 +924,134 @@ async def handle_think_with_tools(config: ProviderConfig, arguments: dict) -> li
         tools = arguments.get("tools", [])
         tool_history = arguments.get("tool_history", [])
 
-        messages = build_chat_messages(agent, message, context, tools=tools)
-        # Sanitize dot-names in tool_history for LLM API compatibility
-        for entry in tool_history:
-            if "tool_calls" in entry:
-                entry = json.loads(json.dumps(entry))  # deep copy
-                for tc in entry.get("tool_calls", []):
-                    fn = tc.get("function", {})
-                    name = fn.get("name", "")
-                    safe = name.replace(".", "_")
-                    if safe != name:
-                        fn["name"] = safe
-            elif entry.get("role") == "tool" and "name" in entry:
-                name = entry.get("name", "")
-                safe = name.replace(".", "_")
-                if safe != name:
-                    entry = {**entry, "name": safe}
-            messages.append(entry)
-
-        # P2: On reasoning models, force-exit the <think> block in iter 2+ via
-        # an assistant prefill. Prevents the Qwen3 / R1 failure mode where the
-        # follow-up tool call is emitted as XML text inside the thinking block.
-        if tool_history and config.reasoning_think_prefill:
-            messages.append({"role": "assistant", "content": "</think>\n\n"})
-
+        messages = _build_think_with_tools_messages(agent, message, context, tools, tool_history, config)
         response_data = await call_llm_api(config, messages, tools)
         result = parse_chat_think_result(config, response_data)
         if (usage := extract_usage(response_data)) is not None:
             result["usage"] = usage
+
+        return [TextContent(type="text", text=json.dumps(result))]
+    except Exception as e:
+        return _error_response(e)
+
+
+async def handle_think_with_tools_streaming(config: ProviderConfig, arguments: dict, ctx) -> list[TextContent]:
+    """Streaming variant of ``think_with_tools`` (MGP §12).
+
+    Emits ``notifications/mgp.stream.chunk`` as tokens arrive from the upstream
+    LLM and returns the final ``CallToolResult`` containing the complete
+    accumulated content (MGP §12.5: final response MUST carry the full result).
+
+    If the upstream produces a structured tool_calls[] response (no streamable
+    text delta), no chunks are emitted and the final result matches the
+    non-streaming path's schema. This preserves agentic-loop semantics.
+
+    Parameters
+    ----------
+    ctx:
+        ``RequestContext`` obtained from ``server.request_context`` by the
+        caller (decorator). Supplies ``request_id`` (for chunk routing) and
+        ``session`` (for the write stream).
+    """
+    from common.mgp_utils import send_mgp_stream_chunk
+
+    try:
+        agent = arguments.get("agent", {})
+        message = arguments.get("message", {})
+        context = arguments.get("context", [])
+        tools = arguments.get("tools", [])
+        tool_history = arguments.get("tool_history", [])
+
+        messages = _build_think_with_tools_messages(agent, message, context, tools, tool_history, config)
+
+        accumulated_text = ""
+        tool_calls_buffer: list[dict] = []
+        finish_reason: str | None = None
+        usage: dict | None = None
+        index = 0
+
+        request_id = getattr(ctx, "request_id", 0)
+        session = ctx.session
+
+        async for chunk in call_llm_api_streaming(config, messages, tools):
+            # Accumulate usage if upstream emits it (most providers send it on
+            # the final chunk; some include it only in the [DONE] preamble).
+            chunk_usage = extract_usage(chunk)
+            if chunk_usage is not None:
+                usage = chunk_usage
+
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+            if "finish_reason" in choice and choice["finish_reason"]:
+                finish_reason = choice["finish_reason"]
+
+            # Buffer structured tool_calls (no streaming to client — they are
+            # inherently partial and only the final assembled form is useful).
+            delta_tool_calls = delta.get("tool_calls")
+            if isinstance(delta_tool_calls, list):
+                for tc in delta_tool_calls:
+                    tc_index = tc.get("index", 0)
+                    while len(tool_calls_buffer) <= tc_index:
+                        tool_calls_buffer.append({})
+                    slot = tool_calls_buffer[tc_index]
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    if tc.get("type"):
+                        slot["type"] = tc["type"]
+                    fn_delta = tc.get("function") or {}
+                    if fn_delta:
+                        fn_slot = slot.setdefault("function", {})
+                        if "name" in fn_delta:
+                            fn_slot["name"] = (fn_slot.get("name") or "") + fn_delta["name"]
+                        if "arguments" in fn_delta:
+                            fn_slot["arguments"] = (fn_slot.get("arguments") or "") + fn_delta["arguments"]
+
+            # Stream text delta to the client.
+            text_delta = delta.get("content") or ""
+            if text_delta:
+                accumulated_text += text_delta
+                await send_mgp_stream_chunk(
+                    session,
+                    request_id=request_id,
+                    index=index,
+                    content={"type": "text", "text": text_delta},
+                    done=False,
+                )
+                index += 1
+
+        # Build a synthetic non-streaming-shaped response and reuse the existing
+        # parser so downstream (fallback regex, reasoning quirks, etc.) stays
+        # behaviorally identical.
+        synthetic: dict = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": accumulated_text,
+                    },
+                    "finish_reason": finish_reason,
+                }
+            ]
+        }
+        if tool_calls_buffer:
+            # Restore dot-names on any emitted tool calls.
+            # _sanitize_tool_names was applied inside call_llm_api_streaming and
+            # the forward map is lost when the generator exits; however the
+            # kernel agentic loop also performs dot-name recovery, so leaving
+            # names as-is is safe. Keep underscore names for now.
+            synthetic["choices"][0]["message"]["tool_calls"] = tool_calls_buffer
+        if usage is not None:
+            synthetic["usage"] = usage
+
+        result = parse_chat_think_result(config, synthetic)
+        if usage is not None:
+            result["usage"] = usage
+
+        # §12.5: final response carries the complete accumulated result.
+        result["_mgp"] = {"streamed": True, "chunks_sent": index}
 
         return [TextContent(type="text", text=json.dumps(result))]
     except Exception as e:
@@ -902,6 +1124,9 @@ def load_llm_provider_config(
     else:
         reasoning_prefill = default_reasoning_prefill
 
+    streaming_env = os.environ.get(f"{prefix}_STREAMING", "").strip().lower()
+    supports_streaming = streaming_env in ("true", "1", "yes", "on")
+
     return ProviderConfig(
         provider_id=os.environ.get(f"{prefix}_PROVIDER", prefix.lower()),
         model_id=os.environ.get(f"{prefix}_MODEL", default_model),
@@ -910,6 +1135,7 @@ def load_llm_provider_config(
         supports_tools=supports_tools,
         display_name=display_name,
         reasoning_think_prefill=reasoning_prefill,
+        supports_streaming=supports_streaming,
     )
 
 
@@ -956,6 +1182,13 @@ def create_llm_mcp_server(config: ProviderConfig) -> Server:
         if name == "think":
             return await handle_think(config, arguments)
         elif name == "think_with_tools":
+            if config.supports_streaming and _mgp_stream_requested.get():
+                try:
+                    ctx = server.request_context
+                except LookupError:
+                    ctx = None
+                if ctx is not None:
+                    return await handle_think_with_tools_streaming(config, arguments, ctx)
             return await handle_think_with_tools(config, arguments)
         else:
             return [
@@ -965,4 +1198,51 @@ def create_llm_mcp_server(config: ProviderConfig) -> Server:
                 )
             ]
 
+    # Wrap the registered CallToolRequest handler to extract the `_mgp.stream`
+    # opt-in flag from the raw `params` (which is NOT exposed to the decorator's
+    # (name, arguments) signature). Stash the flag in a ContextVar so the
+    # decorated handler above can read it.
+    _install_mgp_stream_wrapper(server)
+
     return server
+
+
+def _extract_stream_flag(req) -> bool:
+    """Return True if the tools/call request opts into MGP §12 streaming.
+
+    Opt-in signal: ``params._mgp.stream == True`` on the incoming tools/call.
+    ``CallToolRequestParams`` uses ``extra="allow"`` so the ``_mgp`` field is
+    captured in ``model_extra`` without a schema change.
+    """
+    params = getattr(req, "params", None)
+    extra = getattr(params, "model_extra", None) if params is not None else None
+    if not isinstance(extra, dict):
+        return False
+    mgp = extra.get("_mgp")
+    if not isinstance(mgp, dict):
+        return False
+    return bool(mgp.get("stream"))
+
+
+def _install_mgp_stream_wrapper(server: Server) -> None:
+    """Wrap ``server.request_handlers[CallToolRequest]`` to set a ContextVar.
+
+    On stdio transport ``RequestContext.request`` is ``None`` (the MCP SDK
+    populates it only with HTTP transport metadata), so the decorated
+    ``@server.call_tool()`` handler cannot reach the raw ``_mgp`` field via
+    ``server.request_context``. The CallToolRequest handler, however, receives
+    the typed request object directly — so we hook there and stash the flag
+    in a ContextVar for the decorated handler to consume.
+    """
+    original = server.request_handlers.get(CallToolRequest)
+    if original is None:
+        return  # @server.call_tool() was not used; nothing to wrap
+
+    async def _wrapped(req):
+        token = _mgp_stream_requested.set(_extract_stream_flag(req))
+        try:
+            return await original(req)
+        finally:
+            _mgp_stream_requested.reset(token)
+
+    server.request_handlers[CallToolRequest] = _wrapped
