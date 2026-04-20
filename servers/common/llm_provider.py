@@ -10,6 +10,7 @@ Provides:
 - Common MCP tool definitions and handlers
 """
 
+import asyncio
 import contextvars
 import json
 import os
@@ -17,7 +18,7 @@ import platform
 import re
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from mcp.server import Server
@@ -31,6 +32,45 @@ from mcp.types import CallToolRequest, TextContent
 _mgp_stream_requested: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "cloto_mgp_stream_requested", default=False
 )
+
+# Maximum number of recent chunks retained per request for MGP §12.9
+# gap-retransmission. Dropped chunks result in a gap_unrecoverable notification.
+_CHUNK_BUFFER_MAX: int = 100
+
+
+@dataclass
+class StreamState:
+    """Per-request streaming state used by the MGP interceptor and handler.
+
+    Lives in ``_active_streams[request_id]`` for the lifetime of a
+    ``handle_think_with_tools_streaming`` invocation. The handler publishes
+    incremental progress; the interceptor reads it to build cancel
+    partial_result payloads and to retransmit on gap notifications.
+    """
+
+    request_id: int
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    accumulated_text: str = ""
+    # Each entry is (index, content_dict). Bounded by _CHUNK_BUFFER_MAX.
+    chunk_buffer: list[tuple[int, dict]] = field(default_factory=list)
+    last_index: int = -1
+    cancelled_reason: str | None = None
+
+
+# Per-process registry of in-flight streaming requests. Keyed by JSON-RPC
+# request_id. Populated by handle_think_with_tools_streaming on entry and
+# removed on exit (finally). Read by the MGP interceptor's cancel and gap
+# handlers.
+_active_streams: dict[int, StreamState] = {}
+
+
+def _record_chunk(state: StreamState, index: int, content: dict) -> None:
+    """Append a chunk to the ring-bounded buffer and update last_index."""
+    state.chunk_buffer.append((index, content))
+    if len(state.chunk_buffer) > _CHUNK_BUFFER_MAX:
+        del state.chunk_buffer[0]
+    state.last_index = index
+
 
 # ============================================================
 # Provider Configuration
@@ -942,9 +982,18 @@ async def handle_think_with_tools_streaming(config: ProviderConfig, arguments: d
     LLM and returns the final ``CallToolResult`` containing the complete
     accumulated content (MGP §12.5: final response MUST carry the full result).
 
-    If the upstream produces a structured tool_calls[] response (no streamable
-    text delta), no chunks are emitted and the final result matches the
-    non-streaming path's schema. This preserves agentic-loop semantics.
+    Hardening (Plan 1.5):
+    - Registers a :class:`StreamState` in ``_active_streams[request_id]`` so
+      the MGP interceptor can observe progress for cancel / gap responses.
+    - Polls ``state.cancel_event`` on every iteration; when set, exits the
+      loop cleanly and returns ``{"type":"final","content":<partial>,
+      "_mgp":{"streamed":True,"chunks_sent":N,"cancelled":True,
+      "cancel_reason":<reason>}}``.
+    - Keeps a bounded ring buffer (``_CHUNK_BUFFER_MAX`` entries) of emitted
+      chunks for gap retransmission.
+    - On mid-stream network / timeout errors where at least one chunk has
+      been produced, returns a partial result with an ``error`` sub-object
+      instead of discarding the accumulated text.
 
     Parameters
     ----------
@@ -955,6 +1004,12 @@ async def handle_think_with_tools_streaming(config: ProviderConfig, arguments: d
     """
     from common.mgp_utils import send_mgp_stream_chunk
 
+    request_id = getattr(ctx, "request_id", 0)
+    session = ctx.session
+
+    state = StreamState(request_id=request_id)
+    _active_streams[request_id] = state
+
     try:
         agent = arguments.get("agent", {})
         message = arguments.get("message", {})
@@ -964,73 +1019,113 @@ async def handle_think_with_tools_streaming(config: ProviderConfig, arguments: d
 
         messages = _build_think_with_tools_messages(agent, message, context, tools, tool_history, config)
 
-        accumulated_text = ""
         tool_calls_buffer: list[dict] = []
         finish_reason: str | None = None
         usage: dict | None = None
         index = 0
 
-        request_id = getattr(ctx, "request_id", 0)
-        session = ctx.session
+        stream_error: Exception | None = None
 
-        async for chunk in call_llm_api_streaming(config, messages, tools):
-            # Accumulate usage if upstream emits it (most providers send it on
-            # the final chunk; some include it only in the [DONE] preamble).
-            chunk_usage = extract_usage(chunk)
-            if chunk_usage is not None:
-                usage = chunk_usage
+        try:
+            async for chunk in call_llm_api_streaming(config, messages, tools):
+                if state.cancel_event.is_set():
+                    # Cancellation observed — break out without waiting for [DONE].
+                    break
 
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            choice = choices[0]
-            delta = choice.get("delta") or {}
-            if "finish_reason" in choice and choice["finish_reason"]:
-                finish_reason = choice["finish_reason"]
+                chunk_usage = extract_usage(chunk)
+                if chunk_usage is not None:
+                    usage = chunk_usage
 
-            # Buffer structured tool_calls (no streaming to client — they are
-            # inherently partial and only the final assembled form is useful).
-            delta_tool_calls = delta.get("tool_calls")
-            if isinstance(delta_tool_calls, list):
-                for tc in delta_tool_calls:
-                    tc_index = tc.get("index", 0)
-                    while len(tool_calls_buffer) <= tc_index:
-                        tool_calls_buffer.append({})
-                    slot = tool_calls_buffer[tc_index]
-                    if tc.get("id"):
-                        slot["id"] = tc["id"]
-                    if tc.get("type"):
-                        slot["type"] = tc["type"]
-                    fn_delta = tc.get("function") or {}
-                    if fn_delta:
-                        fn_slot = slot.setdefault("function", {})
-                        if "name" in fn_delta:
-                            fn_slot["name"] = (fn_slot.get("name") or "") + fn_delta["name"]
-                        if "arguments" in fn_delta:
-                            fn_slot["arguments"] = (fn_slot.get("arguments") or "") + fn_delta["arguments"]
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta = choice.get("delta") or {}
+                if "finish_reason" in choice and choice["finish_reason"]:
+                    finish_reason = choice["finish_reason"]
 
-            # Stream text delta to the client.
-            text_delta = delta.get("content") or ""
-            if text_delta:
-                accumulated_text += text_delta
-                await send_mgp_stream_chunk(
-                    session,
-                    request_id=request_id,
-                    index=index,
-                    content={"type": "text", "text": text_delta},
-                    done=False,
-                )
-                index += 1
+                # Buffer structured tool_calls (no streaming to client — they are
+                # inherently partial and only the final assembled form is useful).
+                delta_tool_calls = delta.get("tool_calls")
+                if isinstance(delta_tool_calls, list):
+                    for tc in delta_tool_calls:
+                        tc_index = tc.get("index", 0)
+                        while len(tool_calls_buffer) <= tc_index:
+                            tool_calls_buffer.append({})
+                        slot = tool_calls_buffer[tc_index]
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        if tc.get("type"):
+                            slot["type"] = tc["type"]
+                        fn_delta = tc.get("function") or {}
+                        if fn_delta:
+                            fn_slot = slot.setdefault("function", {})
+                            if "name" in fn_delta:
+                                fn_slot["name"] = (fn_slot.get("name") or "") + fn_delta["name"]
+                            if "arguments" in fn_delta:
+                                fn_slot["arguments"] = (fn_slot.get("arguments") or "") + fn_delta["arguments"]
 
-        # Build a synthetic non-streaming-shaped response and reuse the existing
-        # parser so downstream (fallback regex, reasoning quirks, etc.) stays
-        # behaviorally identical.
+                # Stream text delta to the client.
+                text_delta = delta.get("content") or ""
+                if text_delta:
+                    state.accumulated_text += text_delta
+                    chunk_content = {"type": "text", "text": text_delta}
+                    await send_mgp_stream_chunk(
+                        session,
+                        request_id=request_id,
+                        index=index,
+                        content=chunk_content,
+                        done=False,
+                    )
+                    _record_chunk(state, index, chunk_content)
+                    index += 1
+        except (httpx.TimeoutException, httpx.ConnectError, LlmApiError) as e:
+            # Recoverable mid-stream errors — if we have at least one chunk
+            # emitted, surface a partial result rather than discarding it.
+            stream_error = e
+
+        # --- Cancel path: return the partial snapshot immediately. ------------
+        if state.cancel_event.is_set():
+            cancel_result: dict = {
+                "type": "final",
+                "content": state.accumulated_text,
+                "_mgp": {
+                    "streamed": True,
+                    "chunks_sent": index,
+                    "cancelled": True,
+                    "cancel_reason": state.cancelled_reason or "unspecified",
+                },
+            }
+            return [TextContent(type="text", text=json.dumps(cancel_result))]
+
+        # --- Mid-stream error path (recoverable): partial result with error. --
+        if stream_error is not None and state.accumulated_text:
+            partial_result: dict = {
+                "type": "final",
+                "content": state.accumulated_text,
+                "error": {
+                    "code": (stream_error.code if isinstance(stream_error, LlmApiError) else "stream_error"),
+                    "message": str(stream_error),
+                },
+                "_mgp": {
+                    "streamed": True,
+                    "chunks_sent": index,
+                    "partial": True,
+                },
+            }
+            return [TextContent(type="text", text=json.dumps(partial_result))]
+        if stream_error is not None:
+            # No accumulated content — fall through to the standard error path.
+            return _error_response(stream_error)
+
+        # --- Normal completion: synthesize an OpenAI-shape response and reuse
+        # the non-streaming parser (reasoning fallback, R1 quirks, etc.).
         synthetic: dict = {
             "choices": [
                 {
                     "message": {
                         "role": "assistant",
-                        "content": accumulated_text,
+                        "content": state.accumulated_text,
                     },
                     "finish_reason": finish_reason,
                 }
@@ -1056,6 +1151,8 @@ async def handle_think_with_tools_streaming(config: ProviderConfig, arguments: d
         return [TextContent(type="text", text=json.dumps(result))]
     except Exception as e:
         return _error_response(e)
+    finally:
+        _active_streams.pop(request_id, None)
 
 
 # ============================================================
@@ -1064,9 +1161,40 @@ async def handle_think_with_tools_streaming(config: ProviderConfig, arguments: d
 
 
 async def run_server(server: Server):
-    """Run an MCP server using stdio transport."""
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    """Run an MCP server over stdio with the MGP interceptor mounted.
+
+    The interceptor (``common.mcp_stream_interceptor``) sits between the raw
+    stdio read stream and the ``ServerSession``'s read stream. It pre-dispatches
+    MGP Layer-3 requests (``mgp/stream/cancel``) and custom notifications
+    (``notifications/mgp.stream.gap``) that the MCP SDK would otherwise reject
+    during closed-union validation.
+
+    Non-streaming servers and non-MGP clients see identical behavior: every
+    message they care about is forwarded untouched.
+    """
+    import anyio
+
+    from common.mcp_stream_interceptor import mgp_message_interceptor
+
+    async with stdio_server() as (raw_read, write_stream):
+        # A small buffer keeps producer (interceptor) and consumer
+        # (ServerSession) decoupled without unbounded memory growth.
+        inner_send, inner_recv = anyio.create_memory_object_stream(max_buffer_size=8)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                mgp_message_interceptor,
+                raw_read,
+                inner_send,
+                write_stream,
+                _active_streams,
+            )
+            try:
+                await server.run(inner_recv, write_stream, server.create_initialization_options())
+            finally:
+                # When the server exits (EOF or error), ensure the interceptor
+                # task also terminates by cancelling the task group.
+                tg.cancel_scope.cancel()
 
 
 # ============================================================

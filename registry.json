@@ -187,7 +187,7 @@
       "name": "Local LLM",
       "description": "Recommended local LLM provider. OpenAI-compatible wrapper (default target: LM Studio on port 1234; also works with llama.cpp, vLLM, etc.)",
       "category": "mind",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "directory": "local",
       "dependencies": ["common"],
       "env_vars": [

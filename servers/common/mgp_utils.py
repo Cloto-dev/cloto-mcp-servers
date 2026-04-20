@@ -13,7 +13,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from anyio.streams.memory import MemoryObjectSendStream
     from mcp.server.session import ServerSession
+    from mcp.shared.message import SessionMessage
 
 MGP_VERSION = "0.6.0"
 
@@ -147,3 +149,86 @@ async def send_mgp_stream_chunk(
         params=params,
     )
     await session._write_stream.send(SessionMessage(message=JSONRPCMessage(notification)))
+
+
+# ---------------------------------------------------------------------------
+# Write-stream variants (for the MGP interceptor which only has the raw stream)
+# ---------------------------------------------------------------------------
+
+
+async def write_mgp_method_response(
+    write_stream: "MemoryObjectSendStream[SessionMessage]",
+    request_id: int | str,
+    result: dict,
+) -> None:
+    """Send a JSON-RPC response to a Layer 3 MGP method call (e.g. ``mgp/stream/cancel``).
+
+    The interceptor sits outside the MCP SDK's request/response bookkeeping, so
+    we construct and emit the ``JSONRPCResponse`` manually. ``id`` must match
+    the kernel's originating request id exactly for the kernel's pending-call
+    table to resolve.
+    """
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCMessage, JSONRPCResponse
+
+    response = JSONRPCResponse(jsonrpc="2.0", id=request_id, result=result)
+    await write_stream.send(SessionMessage(message=JSONRPCMessage(response)))
+
+
+async def write_mgp_method_error(
+    write_stream: "MemoryObjectSendStream[SessionMessage]",
+    request_id: int | str,
+    code: int,
+    message: str,
+    data: dict | None = None,
+) -> None:
+    """Send a JSON-RPC error reply to an MGP Layer 3 method call (MGP §14)."""
+    from mcp.shared.message import SessionMessage
+    from mcp.types import ErrorData, JSONRPCError, JSONRPCMessage
+
+    err = ErrorData(code=code, message=message, data=data)
+    response = JSONRPCError(jsonrpc="2.0", id=request_id, error=err)
+    await write_stream.send(SessionMessage(message=JSONRPCMessage(response)))
+
+
+async def write_mgp_notification(
+    write_stream: "MemoryObjectSendStream[SessionMessage]",
+    method: str,
+    params: dict,
+) -> None:
+    """Emit an arbitrary custom MGP notification via a raw write stream.
+
+    Used by the interceptor path (which has the write_stream but no
+    ``ServerSession``). For session-scoped call sites inside a handler, prefer
+    :func:`send_mgp_stream_chunk`.
+    """
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCMessage, JSONRPCNotification
+
+    notification = JSONRPCNotification(jsonrpc="2.0", method=method, params=params)
+    await write_stream.send(SessionMessage(message=JSONRPCMessage(notification)))
+
+
+async def write_mgp_stream_chunk(
+    write_stream: "MemoryObjectSendStream[SessionMessage]",
+    request_id: int | str,
+    index: int,
+    content: dict,
+    done: bool = False,
+    mgp_meta: dict | None = None,
+) -> None:
+    """``send_mgp_stream_chunk`` variant that uses a raw write stream.
+
+    The interceptor's gap-retransmit path holds only the raw ``write_stream``
+    (no ``ServerSession``), so we cannot reuse the session-based helper. Keep
+    the payload shape identical to :func:`send_mgp_stream_chunk`.
+    """
+    params: dict[str, Any] = {
+        "request_id": request_id,
+        "index": index,
+        "content": content,
+        "done": done,
+    }
+    if mgp_meta:
+        params["_mgp"] = mgp_meta
+    await write_mgp_notification(write_stream, "notifications/mgp.stream.chunk", params)

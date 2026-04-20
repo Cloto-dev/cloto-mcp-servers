@@ -1,6 +1,6 @@
 """Tests for MGP §12 streaming path in common.llm_provider.
 
-Covers Plan 1 (mind.local MGP Streaming PoC):
+Covers Plan 1 (mind.local MGP Streaming PoC) and Plan 1.5 (hardening):
 - SSE line parsing (data: {...}, data: [DONE], blank lines, comments)
 - Config plumbing (ProviderConfig.supports_streaming, LOCAL_STREAMING env)
 - Opt-in detection via params._mgp.stream (CallToolRequestParams.model_extra)
@@ -8,10 +8,15 @@ Covers Plan 1 (mind.local MGP Streaming PoC):
 - Final CallToolResult carries the complete accumulated content (§12.5)
 - Backward compatibility: non-streaming path unchanged
 - Fallback: config.supports_streaming=False ignores the _mgp flag
+- Plan 1.5: mgp/stream/cancel handler + partial_result (§12.7)
+- Plan 1.5: notifications/mgp.stream.gap retransmission from chunk buffer (§12.9)
+- Plan 1.5: chunk buffer is bounded to _CHUNK_BUFFER_MAX entries
+- Plan 1.5: partial result on mid-stream timeout/connection error
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -22,18 +27,23 @@ import pytest
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
-from mcp.types import CallToolRequest, CallToolRequestParams  # noqa: E402
+from mcp.types import CallToolRequest, CallToolRequestParams, JSONRPCNotification, JSONRPCRequest  # noqa: E402
 
 from common.llm_provider import (  # noqa: E402
+    _CHUNK_BUFFER_MAX,
     ProviderConfig,
+    StreamState,
+    _active_streams,
     _extract_stream_flag,
     _mgp_stream_requested,
+    _record_chunk,
     call_llm_api_streaming,
     create_llm_mcp_server,
     handle_think_with_tools,
     handle_think_with_tools_streaming,
     load_llm_provider_config,
 )
+from common.mcp_stream_interceptor import _handle_mgp_cancel, _handle_mgp_gap  # noqa: E402
 from common.mgp_utils import send_mgp_stream_chunk  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -478,3 +488,262 @@ async def test_config_disabled_disables_streaming_even_with_flag(non_streaming_c
     payload = json.loads(result[0].text)
     assert payload["content"] == "sync"
     assert "_mgp" not in payload
+
+
+# ---------------------------------------------------------------------------
+# Plan 1.5: MGP interceptor — cancel / gap / buffer
+# ---------------------------------------------------------------------------
+
+
+class _CapturingWriteStream:
+    """Mock of ``MemoryObjectSendStream[SessionMessage]`` used to capture the
+    SessionMessage objects produced by the interceptor handlers. We only care
+    about the JSON-RPC payload shape, so we expose ``.sent`` as a list of
+    dicts (``.model_dump()`` of the root message)."""
+
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send(self, session_message) -> None:
+        self.sent.append(session_message.message.root.model_dump(by_alias=True, exclude_none=True))
+
+
+def _make_cancel_request(req_id: int, target_id: int, reason: str) -> JSONRPCRequest:
+    return JSONRPCRequest(
+        jsonrpc="2.0",
+        id=req_id,
+        method="mgp/stream/cancel",
+        params={"request_id": target_id, "reason": reason},
+    )
+
+
+def _make_gap_notification(target_id: int, missing: list[int]) -> JSONRPCNotification:
+    return JSONRPCNotification(
+        jsonrpc="2.0",
+        method="notifications/mgp.stream.gap",
+        params={"request_id": target_id, "missing_indices": missing},
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_handler_sets_event_and_responds_with_partial():
+    state = StreamState(request_id=42)
+    state.accumulated_text = "Hello world"
+    streams = {42: state}
+    write = _CapturingWriteStream()
+
+    await _handle_mgp_cancel(
+        _make_cancel_request(req_id=100, target_id=42, reason="user_cancelled"),
+        write,
+        streams,
+    )
+
+    assert state.cancel_event.is_set() is True
+    assert state.cancelled_reason == "user_cancelled"
+    assert len(write.sent) == 1
+    sent = write.sent[0]
+    assert sent["id"] == 100
+    assert sent["result"]["cancelled"] is True
+    assert sent["result"]["partial_result"]["content"] == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_cancel_handler_on_nonexistent_request_returns_inactive():
+    streams: dict[int, StreamState] = {}
+    write = _CapturingWriteStream()
+
+    await _handle_mgp_cancel(
+        _make_cancel_request(req_id=101, target_id=999, reason="stale"),
+        write,
+        streams,
+    )
+
+    assert len(write.sent) == 1
+    sent = write.sent[0]
+    assert sent["id"] == 101
+    assert sent["result"] == {"cancelled": False, "reason": "not_active"}
+
+
+@pytest.mark.asyncio
+async def test_gap_handler_retransmits_from_buffer():
+    state = StreamState(request_id=7)
+    for i in range(5):
+        _record_chunk(state, i, {"type": "text", "text": f"chunk{i}"})
+    streams = {7: state}
+    write = _CapturingWriteStream()
+
+    await _handle_mgp_gap(_make_gap_notification(7, [1, 3]), write, streams)
+
+    # Two retransmissions, one per requested index, sorted ascending.
+    assert len(write.sent) == 2
+    sent_indices = [s["params"]["index"] for s in write.sent]
+    assert sent_indices == [1, 3]
+    for s in write.sent:
+        assert s["method"] == "notifications/mgp.stream.chunk"
+        assert s["params"]["request_id"] == 7
+        assert s["params"]["_mgp"] == {"retransmit": True}
+    # Text content matches the originally buffered chunks.
+    assert write.sent[0]["params"]["content"]["text"] == "chunk1"
+    assert write.sent[1]["params"]["content"]["text"] == "chunk3"
+
+
+@pytest.mark.asyncio
+async def test_gap_handler_emits_unrecoverable_when_buffer_discarded():
+    state = StreamState(request_id=7)
+    # Only indices 50..149 survive in the buffer (earliest 50 evicted).
+    for i in range(150):
+        _record_chunk(state, i, {"type": "text", "text": f"c{i}"})
+    assert len(state.chunk_buffer) == _CHUNK_BUFFER_MAX
+    streams = {7: state}
+    write = _CapturingWriteStream()
+
+    # Request index 3 — long-since evicted.
+    await _handle_mgp_gap(_make_gap_notification(7, [3]), write, streams)
+
+    assert len(write.sent) == 1
+    sent = write.sent[0]
+    assert sent["method"] == "notifications/mgp.stream.gap_unrecoverable"
+    assert sent["params"]["missing_index"] == 3
+    assert sent["params"]["reason"] == "chunk_evicted"
+
+
+@pytest.mark.asyncio
+async def test_gap_handler_unrecoverable_when_stream_completed():
+    streams: dict[int, StreamState] = {}
+    write = _CapturingWriteStream()
+
+    await _handle_mgp_gap(_make_gap_notification(999, [0]), write, streams)
+
+    assert len(write.sent) == 1
+    assert write.sent[0]["method"] == "notifications/mgp.stream.gap_unrecoverable"
+    assert write.sent[0]["params"]["reason"] == "stream_completed"
+
+
+def test_chunk_buffer_is_bounded_to_max():
+    state = StreamState(request_id=1)
+    for i in range(_CHUNK_BUFFER_MAX + 50):
+        _record_chunk(state, i, {"type": "text", "text": str(i)})
+    # The buffer should hold exactly _CHUNK_BUFFER_MAX entries,
+    # and the oldest retained index must be _CHUNK_BUFFER_MAX - 1 fewer than
+    # the last index.
+    assert len(state.chunk_buffer) == _CHUNK_BUFFER_MAX
+    assert state.last_index == _CHUNK_BUFFER_MAX + 49
+    assert state.chunk_buffer[0][0] == 50
+    assert state.chunk_buffer[-1][0] == _CHUNK_BUFFER_MAX + 49
+
+
+# ---------------------------------------------------------------------------
+# Plan 1.5: handle_think_with_tools_streaming — cancel / partial on error
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_streaming_returns_partial_on_cancel(streaming_config, minimal_args):
+    """A cancel event set mid-stream short-circuits the loop; the handler
+    returns the accumulated text with _mgp.cancelled=True."""
+
+    async def mock_stream_gen():
+        yield {"choices": [{"delta": {"content": "Hel"}}]}
+        # Allow the interceptor-like cancel to take effect before next chunk.
+        await asyncio.sleep(0)
+        # Flip the cancel flag on the currently-active stream state.
+        for st in _active_streams.values():
+            st.cancelled_reason = "user_cancelled"
+            st.cancel_event.set()
+            break
+        yield {"choices": [{"delta": {"content": "lo"}}]}
+
+    session = MagicMock()
+    session._write_stream = MagicMock()
+    session._write_stream.send = AsyncMock()
+    ctx = SimpleNamespace(request_id=321, session=session)
+
+    with patch("common.llm_provider.call_llm_api_streaming", return_value=mock_stream_gen()):
+        result = await handle_think_with_tools_streaming(streaming_config, minimal_args, ctx)
+
+    payload = json.loads(result[0].text)
+    assert payload["type"] == "final"
+    # Only the first chunk ("Hel") was emitted before cancel was observed.
+    assert payload["content"] == "Hel"
+    assert payload["_mgp"]["cancelled"] is True
+    assert payload["_mgp"]["cancel_reason"] == "user_cancelled"
+    assert payload["_mgp"]["chunks_sent"] == 1
+    # Registry cleaned up in finally.
+    assert 321 not in _active_streams
+
+
+@pytest.mark.asyncio
+async def test_streaming_returns_partial_on_midstream_timeout(streaming_config, minimal_args):
+    """httpx.TimeoutException mid-stream must return partial result + error meta."""
+    import httpx
+
+    async def mock_stream_gen():
+        yield {"choices": [{"delta": {"content": "half "}}]}
+        raise httpx.TimeoutException("simulated")
+
+    session = MagicMock()
+    session._write_stream = MagicMock()
+    session._write_stream.send = AsyncMock()
+    ctx = SimpleNamespace(request_id=555, session=session)
+
+    with patch("common.llm_provider.call_llm_api_streaming", return_value=mock_stream_gen()):
+        result = await handle_think_with_tools_streaming(streaming_config, minimal_args, ctx)
+
+    payload = json.loads(result[0].text)
+    assert payload["type"] == "final"
+    assert payload["content"] == "half "
+    assert payload["_mgp"]["partial"] is True
+    assert payload["_mgp"]["chunks_sent"] == 1
+    assert payload["error"]["code"] == "stream_error"
+
+
+@pytest.mark.asyncio
+async def test_streaming_returns_error_when_zero_chunks_before_failure(streaming_config, minimal_args):
+    """If the stream fails BEFORE any chunk arrives, fall back to the standard
+    error response (no partial contract because there is nothing to preserve)."""
+    import httpx
+
+    async def mock_stream_gen():
+        # Yield nothing before raising.
+        if False:
+            yield {}  # pragma: no cover — unreachable, keeps this an async gen
+        raise httpx.ConnectError("unreachable")
+
+    session = MagicMock()
+    session._write_stream = MagicMock()
+    session._write_stream.send = AsyncMock()
+    ctx = SimpleNamespace(request_id=777, session=session)
+
+    with patch("common.llm_provider.call_llm_api_streaming", return_value=mock_stream_gen()):
+        result = await handle_think_with_tools_streaming(streaming_config, minimal_args, ctx)
+
+    payload = json.loads(result[0].text)
+    # _error_response format: {"error": "...", "error_code": "..."}
+    assert "error" in payload
+    assert "content" not in payload  # not a partial-final
+
+
+@pytest.mark.asyncio
+async def test_streaming_registers_and_cleans_up_active_stream(streaming_config, minimal_args):
+    """Verify _active_streams[request_id] is populated during the stream and
+    removed afterwards (verifies the finally cleanup guarantee)."""
+    request_id = 4242
+    observed_during: bool = False
+
+    async def mock_stream_gen():
+        nonlocal observed_during
+        observed_during = request_id in _active_streams
+        yield {"choices": [{"delta": {"content": "ok"}}]}
+
+    session = MagicMock()
+    session._write_stream = MagicMock()
+    session._write_stream.send = AsyncMock()
+    ctx = SimpleNamespace(request_id=request_id, session=session)
+
+    # Ensure no leftover from a prior test.
+    _active_streams.pop(request_id, None)
+    with patch("common.llm_provider.call_llm_api_streaming", return_value=mock_stream_gen()):
+        await handle_think_with_tools_streaming(streaming_config, minimal_args, ctx)
+
+    assert observed_during is True
+    assert request_id not in _active_streams
