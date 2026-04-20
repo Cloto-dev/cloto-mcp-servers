@@ -22,7 +22,7 @@ import httpx
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.normpath(os.path.join(_script_dir, "..")))
 
-from common.llm_provider import build_chat_messages
+from common.llm_provider import _model_suggests_reasoning, build_chat_messages
 from common.mcp_utils import ToolRegistry, run_mcp_server
 from common.validation import validate_dict, validate_list
 
@@ -37,7 +37,19 @@ BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 MODEL_ID = os.environ.get("OLLAMA_MODEL", "")
 REQUEST_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT_SECS", "120"))
 MAX_PREDICT = int(os.environ.get("OLLAMA_MAX_PREDICT", "2048"))
-ENABLE_THINKING = os.environ.get("OLLAMA_ENABLE_THINKING", "false").lower() == "true"
+
+# Ollama's `think: true/false` body flag maps the OpenAI-style reasoning
+# toggle. Precedence:
+#   1. Explicit OLLAMA_ENABLE_THINKING env var (true/false)
+#   2. Heuristic auto-detect from OLLAMA_MODEL (qwen3/qwq/r1/etc.)
+#   3. Default: False
+_enable_thinking_env = os.environ.get("OLLAMA_ENABLE_THINKING", "").strip().lower()
+if _enable_thinking_env in ("true", "1", "yes", "on"):
+    ENABLE_THINKING = True
+elif _enable_thinking_env in ("false", "0", "no", "off"):
+    ENABLE_THINKING = False
+else:
+    ENABLE_THINKING = _model_suggests_reasoning(MODEL_ID) is True
 
 # Mutable session state (protected by _model_lock for concurrent access)
 _active_model = MODEL_ID

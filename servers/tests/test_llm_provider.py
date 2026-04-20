@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath
 from common.llm_provider import (
     ProviderConfig,
     _extract_tool_calls_from_text,
+    _model_suggests_reasoning,
     _strip_reasoning_artifacts,
     handle_think_with_tools,
     load_llm_provider_config,
@@ -366,5 +367,77 @@ def test_config_loader_respects_env_var_false_overrides_default(monkeypatch):
 
 def test_config_loader_uses_default_when_env_var_absent(monkeypatch):
     monkeypatch.delenv("TESTP_REASONING_PREFILL", raising=False)
+    monkeypatch.delenv("TESTP_MODEL", raising=False)
+    cfg = load_llm_provider_config(prefix="TESTP", display_name="Test", default_reasoning_prefill=True)
+    assert cfg.reasoning_think_prefill is True
+
+
+# ---------------------------------------------------------------------------
+# _model_suggests_reasoning heuristic
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model_id,expected",
+    [
+        # Positive: recognisable reasoning / thinking families
+        ("qwen/qwen3.5-9b", True),
+        ("qwen3.5-4b", True),
+        ("qwen3.6-35b-a3b", True),
+        ("qwen3-instruct-7b", True),  # Qwen3 dual-mode wins over "instruct"
+        ("qwen-3-7b", True),
+        ("deepseek-r1", True),
+        ("deepseek-r1-distill-llama-8b", True),
+        ("deepseek-reasoner", True),
+        ("qwq-32b", True),
+        ("llama-3-thinking-70b", True),
+        ("o1-preview", True),
+        ("o1-mini", True),
+        ("o3-mini", True),
+        # Negative: known non-reasoning patterns
+        ("qwen2.5-7b-instruct", False),
+        ("llama-3.1-8b-instruct", False),
+        ("mistral-7b-instruct-v0.2", False),
+        # Unknown: neither hint matches → None (caller uses default)
+        ("", None),
+        ("gpt-4o", None),
+        ("claude-sonnet-4-6", None),
+        ("text-embedding-nomic-embed-text-v1.5", None),
+        ("some-random-model-name", None),
+    ],
+)
+def test_model_suggests_reasoning(model_id, expected):
+    assert _model_suggests_reasoning(model_id) is expected
+
+
+def test_config_loader_auto_detects_reasoning_from_model_id(monkeypatch):
+    """When env var is absent, model_id like qwen3* flips prefill ON."""
+    monkeypatch.delenv("TESTP_REASONING_PREFILL", raising=False)
+    monkeypatch.setenv("TESTP_MODEL", "qwen/qwen3.5-9b")
+    cfg = load_llm_provider_config(prefix="TESTP", display_name="Test", default_reasoning_prefill=False)
+    assert cfg.reasoning_think_prefill is True
+
+
+def test_config_loader_auto_detects_instruct_as_non_reasoning(monkeypatch):
+    """An *-instruct model without reasoning hints flips prefill OFF."""
+    monkeypatch.delenv("TESTP_REASONING_PREFILL", raising=False)
+    monkeypatch.setenv("TESTP_MODEL", "qwen2.5-7b-instruct")
+    # default=True simulates mind.local's current config; auto-detect overrides
+    cfg = load_llm_provider_config(prefix="TESTP", display_name="Test", default_reasoning_prefill=True)
+    assert cfg.reasoning_think_prefill is False
+
+
+def test_config_loader_env_var_beats_auto_detect(monkeypatch):
+    """User's explicit env var wins over heuristic."""
+    monkeypatch.setenv("TESTP_REASONING_PREFILL", "false")
+    monkeypatch.setenv("TESTP_MODEL", "qwen/qwen3.5-9b")  # would auto-detect True
+    cfg = load_llm_provider_config(prefix="TESTP", display_name="Test", default_reasoning_prefill=True)
+    assert cfg.reasoning_think_prefill is False
+
+
+def test_config_loader_unknown_model_falls_back_to_default(monkeypatch):
+    """Unknown model name leaves the server-supplied default untouched."""
+    monkeypatch.delenv("TESTP_REASONING_PREFILL", raising=False)
+    monkeypatch.setenv("TESTP_MODEL", "gpt-4o")
     cfg = load_llm_provider_config(prefix="TESTP", display_name="Test", default_reasoning_prefill=True)
     assert cfg.reasoning_think_prefill is True

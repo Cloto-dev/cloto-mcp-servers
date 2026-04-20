@@ -164,6 +164,43 @@ class ProviderConfig:
 # ============================================================
 
 
+# Models whose name suggests they run in a thinking / reasoning mode (emit
+# <think>...</think> blocks, reasoning_content, or need the iter-2 </think>
+# prefill workaround). Matched with word-boundary regex below.
+#
+# Positive hints — any match implies reasoning=True:
+#   qwen3 / qwen-3 : Qwen3 series (including 3.5 / 3.6); unified chat+thinking
+#   qwq            : Qwen's QwQ reasoning line
+#   r1             : DeepSeek-R1 and R1-distill derivatives
+#   reasoner       : deepseek-reasoner etc.
+#   thinking       : models that self-label (Llama-Thinking etc.)
+#   o1- / o3-      : OpenAI reasoning families
+_REASONING_HINT_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:qwen-?3|qwq|r1|reasoner|thinking|o[13])(?:[^a-z0-9]|$)",
+    re.IGNORECASE,
+)
+# Negative hint — a model explicitly labelled *-instruct without any reasoning
+# hint is treated as non-reasoning (helps Qwen2.5-Instruct, Llama-Instruct).
+_INSTRUCT_HINT_RE = re.compile(r"(?:^|[^a-z0-9])instruct(?:[^a-z0-9]|$)", re.IGNORECASE)
+
+
+def _model_suggests_reasoning(model_id: str) -> bool | None:
+    """Heuristic: does this model name indicate a reasoning / thinking model?
+
+    Returns True / False when the name is recognisable, or None when it's
+    empty or ambiguous (caller should fall back to the configured default).
+    Reasoning hints win over `instruct` so e.g. Qwen3-*-Instruct (dual-mode)
+    still comes out True.
+    """
+    if not model_id:
+        return None
+    if _REASONING_HINT_RE.search(model_id):
+        return True
+    if _INSTRUCT_HINT_RE.search(model_id):
+        return False
+    return None
+
+
 def model_supports_tools(config: ProviderConfig) -> bool:
     """Check if the configured model supports tool schemas.
 
@@ -803,8 +840,7 @@ async def call_llm_api_streaming(
                 # will carry `_mgp.partial=true`).
                 if not done_received:
                     raise LlmApiError(
-                        "Upstream closed stream before [DONE] marker "
-                        "(response may be truncated)",
+                        "Upstream closed stream before [DONE] marker (response may be truncated)",
                         "upstream_truncated",
                     )
     except httpx.ConnectError:
@@ -1266,20 +1302,42 @@ def load_llm_provider_config(
             api_url,
         )
 
+    model_id = os.environ.get(f"{prefix}_MODEL", default_model)
+
+    # Resolve the </think> prefill flag with three-level precedence:
+    #   1. Explicit `{PREFIX}_REASONING_PREFILL` env var (user override)
+    #   2. Heuristic auto-detection from the configured model_id
+    #   3. `default_reasoning_prefill` fall-back
+    # Auto-detection only fires when the model name is recognisable — mixed /
+    # unknown names fall through to the server-supplied default so we don't
+    # silently flip behaviour under users with custom deployments.
     prefill_env = os.environ.get(f"{prefix}_REASONING_PREFILL", "").strip().lower()
     if prefill_env in ("true", "1", "yes", "on"):
         reasoning_prefill = True
     elif prefill_env in ("false", "0", "no", "off"):
         reasoning_prefill = False
     else:
-        reasoning_prefill = default_reasoning_prefill
+        detected = _model_suggests_reasoning(model_id)
+        if detected is None:
+            reasoning_prefill = default_reasoning_prefill
+        else:
+            reasoning_prefill = detected
+            logger.info(
+                "%s: auto-detected %s model from model_id=%r; "
+                "reasoning_prefill=%s. Override with %s_REASONING_PREFILL=true/false.",
+                display_name,
+                "reasoning" if detected else "non-reasoning",
+                model_id,
+                reasoning_prefill,
+                prefix,
+            )
 
     streaming_env = os.environ.get(f"{prefix}_STREAMING", "").strip().lower()
     supports_streaming = streaming_env in ("true", "1", "yes", "on")
 
     return ProviderConfig(
         provider_id=os.environ.get(f"{prefix}_PROVIDER", prefix.lower()),
-        model_id=os.environ.get(f"{prefix}_MODEL", default_model),
+        model_id=model_id,
         api_url=api_url,
         request_timeout=int(os.environ.get(f"{prefix}_TIMEOUT_SECS", str(default_timeout))),
         supports_tools=supports_tools,
