@@ -4,6 +4,7 @@ Eliminates boilerplate list_tools/call_tool patterns across all servers.
 """
 
 import json
+import logging
 from collections.abc import Callable
 
 from mcp.server import Server
@@ -11,6 +12,41 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool, ToolAnnotations
 
 from common.validation import validate_bool, validate_dict, validate_int, validate_list, validate_str
+
+
+class _MgpValidationFilter(logging.Filter):
+    """Drop mcp.shared.session's bulk pydantic validation warnings.
+
+    The Python MCP SDK's ``ClientRequest`` union doesn't include MGP
+    extensions (``mgp/callback/respond``, ``notifications/mgp.*``). Every
+    time the kernel sends one the SDK logs a 30+ line ``Failed to validate
+    request`` warning against every known method, even though the SDK's
+    own error-response path handles it cleanly. These warnings are pure
+    noise and drown out genuine errors.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not msg.startswith("Failed to validate request:") and not msg.startswith(
+            "Failed to validate notification:"
+        )
+
+
+_MGP_FILTER_INSTALLED = False
+
+
+def install_mgp_validation_filter() -> None:
+    """Install the MGP validation log filter on the root logger.
+
+    Called automatically by ``run_mcp_server``. Servers with a custom
+    main loop (e.g. ones that also serve HTTP) should call this
+    explicitly before entering ``stdio_server``.
+    """
+    global _MGP_FILTER_INSTALLED
+    if _MGP_FILTER_INSTALLED:
+        return
+    logging.getLogger().addFilter(_MgpValidationFilter())
+    _MGP_FILTER_INSTALLED = True
 
 _VALIDATORS: dict[type, Callable] = {
     bool: validate_bool,
@@ -109,5 +145,6 @@ class ToolRegistry:
 
 async def run_mcp_server(registry: ToolRegistry):
     """Standard MCP server main loop."""
+    install_mgp_validation_filter()
     async with stdio_server() as (read_stream, write_stream):
         await registry.server.run(read_stream, write_stream, registry.server.create_initialization_options())
