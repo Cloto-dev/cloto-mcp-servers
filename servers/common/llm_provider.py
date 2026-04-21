@@ -1005,11 +1005,23 @@ def _build_think_with_tools_messages(
                 entry = {**entry, "name": safe}
         messages.append(entry)
 
-    # P2: On reasoning models, force-exit the <think> block in iter 2+ via
-    # an assistant prefill. Prevents the Qwen3 / R1 failure mode where the
-    # follow-up tool call is emitted as XML text inside the thinking block.
-    if tool_history and config.reasoning_think_prefill:
-        messages.append({"role": "assistant", "content": "</think>\n\n"})
+    # P2: On reasoning models, force-exit the <think> block via an assistant
+    # prefill. Prevents the Qwen3 / R1 failure mode where the follow-up tool
+    # call is emitted as XML text inside the thinking block.
+    #
+    # We prefill a full empty block (<think>\n\n</think>\n\n) rather than just
+    # the closing tag, because LM Studio / llama.cpp ignore the official
+    # chat_template_kwargs.enable_thinking knob (upstream bug), so the template
+    # still injects <think> at the start of every assistant turn. A close-only
+    # prefill leaves room for the model to re-enter thinking; a full empty
+    # block reliably produces 0 reasoning tokens and keeps the completion
+    # budget available for the actual answer and tool calls.
+    #
+    # We also apply the prefill on iteration 1 (not just 2+), because Qwen3.5
+    # defaults to thinking-on with no soft-switch like Qwen3's /no_think, so
+    # the first generation burns the same budget without the prefill.
+    if config.reasoning_think_prefill:
+        messages.append({"role": "assistant", "content": "<think>\n\n</think>\n\n"})
     return messages
 
 
