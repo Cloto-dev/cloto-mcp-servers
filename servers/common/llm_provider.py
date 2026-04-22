@@ -1244,13 +1244,22 @@ def _build_mgp_capabilities(config: "ProviderConfig") -> dict[str, dict]:
     ``experimental_capabilities`` — the kernel accepts
     ``capabilities.experimental.mgp`` as equivalent to ``capabilities.mgp``
     during the Python SDK transition period (MGP_SECURITY §2.3).
+
+    Note: ``permissions_required`` is intentionally omitted. LLM-bridge
+    servers are configured at the kernel side with the ``core`` trust level,
+    which grants Unrestricted network access via the isolation profile
+    (MGP_ISOLATION_DESIGN §3.2). Self-declaring ``network.outbound`` would
+    add the permission to ``CLOTO_YOLO_EXCEPTIONS`` (see MGP_SECURITY §3.3)
+    and require operator approval on every startup, blocking the server
+    even though the kernel already permits the network access. The trust
+    level is likewise informational at the protocol layer (§2.3) — the
+    kernel determines the effective trust level from ``mcp.toml`` — so we
+    omit ``trust_level`` from the self-declaration as well.
     """
     from common.mgp_utils import MgpCapabilities
 
     mgp = MgpCapabilities()
     mgp.set_server_id(f"cloto-mcp-{config.provider_id}")
-    mgp.require_permission("network.outbound")
-    mgp.set_trust_level("standard")
     mgp.add_extension("streaming")
     return mgp.as_dict()
 
