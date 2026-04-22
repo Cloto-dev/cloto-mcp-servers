@@ -912,5 +912,181 @@ When `retryable` is `true`, the client SHOULD:
 
 When `retryable` is `false`, the client MUST NOT retry and SHOULD report the error.
 
+### 14.7 Tool Rejection Envelope
+
+§14.1–14.6 cover JSON-RPC errors — the `error` field of a failed
+request-response pair. §14.7 addresses a separate failure class: a
+tool-call that was delivered successfully but the kernel or server
+refused to execute on policy or logical grounds. This is conveyed
+through the `CallToolResult.isError = true` path, not `error`, and
+carries a structured body so clients can react programmatically.
+
+#### 14.7.1 Error vs Rejection
+
+| Dimension | JSON-RPC Error (§14.1–14.6) | Tool Rejection (§14.7) |
+|---|---|---|
+| Transport field | `error` on response | `result.isError = true` + `content` |
+| Meaning | The request could not be processed (parse failure, method not found, transport dropped, rate limited, timeout) | The request was processed but a policy/logic gate refused the execution |
+| Examples | `PERMISSION_DENIED` on `mgp/permission/grant`, `RATE_LIMITED`, `UPSTREAM_TIMEOUT` | YOLO mode disabled, access-control `Deny`, delegation cycle, code-safety violation |
+| Agentic loop | Surfaced as a transport-level failure; standard retry policy | Surfaced to the LLM as a *tool output* with explicit "do not retry" directive; may trip a loop-break short-circuit |
+| Retry semantics | `_mgp.retryable`, `retry_after_ms` per §14.4 | Rejection's own `retryable` flag (§14.7.2); `false` is a hard constraint that no operator action can lift |
+
+A rejection is never a JSON-RPC error. JSON-RPC errors indicate the
+protocol could not complete; rejections indicate the protocol completed
+successfully but the tool answer is a structured "no".
+
+#### 14.7.2 Rejection Body Schema
+
+The tool response MUST set `isError: true` and MUST include at least
+one `TextContent` whose `text` parses as a single JSON object matching
+this schema:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `status` | string | yes | MUST be `"rejected"` or `"denied"` (case-sensitive). Clients use this as the sentinel to distinguish a rejection from an ordinary runtime error text. |
+| `reason` | string | yes | Self-contained natural-language explanation intended for direct injection into an LLM's tool_history. MUST NOT depend on the reader recognising `code` names (see §14.7.5). |
+| `retryable` | boolean | no — default `true` | When `false`, the rejection reflects a logical constraint that no operator action can resolve. Clients MUST NOT retry. |
+| `remediation_hint` | string | no | Short operator-facing suggestion. The alias `remediation` is accepted for brevity. |
+| `code` | string | no | Stable identifier from the registry in §14.7.3. Absent when the source server does not assign one; the kernel MAY stamp `"UNKNOWN"` on forwarding. |
+| *(other keys)* | any | no | Additional diagnostic context (e.g., `violations`, `chain`). Clients MUST preserve these for audit but SHOULD NOT alter control flow based on unregistered fields. |
+
+Wire example (an external server rejecting a call):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "result": {
+    "isError": true,
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"rejected\",\"code\":\"ACCESS_DENIED\",\"reason\":\"Caller is not on the allowlist for sensitive_op.\",\"remediation_hint\":\"Ask the operator to grant access.\",\"retryable\":true}"
+      }
+    ]
+  }
+}
+```
+
+#### 14.7.3 RejectionCode Registry
+
+Stable SCREAMING_SNAKE_CASE identifiers. Kernels MAY issue any of
+these directly (when rejecting from a kernel-native tool) or forward
+them transparently when an external server supplies one.
+
+| Code | Meaning | Typical `retryable` |
+|---|---|---|
+| `YOLO_REQUIRED` | Privileged (YOLO) mode is required but currently disabled by the operator. | `true` |
+| `ACCESS_DENIED` | Access-control policy denies this agent from using the tool. | `true` |
+| `SEAL_UNSIGNED` | The providing MCP server is not signed at the required trust level. | `true` |
+| `RISK_UNAPPROVED` | The tool is classified as dangerous and has not been approved for autonomous execution. | `true` |
+| `CODE_UNSAFE` | Generated MCP server code failed safety validation. Typically carries a `violations` array. | `true` |
+| `DELEGATION_CYCLE` | Inter-agent delegation would form a cycle. Typically carries a `chain` array. | `false` |
+| `DELEGATION_DEPTH` | Inter-agent delegation chain exceeded the maximum depth. | `false` |
+| `SELF_DELEGATION` | Caller attempted to delegate to itself. | `false` |
+| `UNKNOWN` | External server rejection without a mappable code. | defer to body |
+
+Codes are serialised as JSON strings in SCREAMING_SNAKE_CASE.
+Serialisation is case-sensitive; a server returning `"Rejected"` or
+`"REJECTED"` MUST NOT be promoted to a rejection — it stays on the
+generic error path.
+
+#### 14.7.4 Server Opt-In
+
+External MCP servers are OPTIONAL participants in §14.7:
+
+- A server that wants structured policy signalling SHOULD emit a
+  Rejection-shaped body on `isError: true`.
+- Servers that keep the existing free-form `{"error": "..."}` body
+  remain fully compliant. Kernels MUST treat any `isError: true`
+  payload that does not parse as a rejection (missing or mismatched
+  `status`) as a generic runtime error.
+- Kernels MUST NOT promote `isError: false` results to rejections,
+  even when the body happens to contain a rejection-like sentinel —
+  the `isError` flag is authoritative.
+
+#### 14.7.5 Kernel Agentic Loop Handling
+
+When a kernel receives a rejection (either native-issued or promoted
+from an external server), it MUST:
+
+1. Emit an observability signal that the tool call failed
+   (e.g., `ToolInvoked { success: false }`) together with a
+   dedicated rejection event so dashboards can differentiate a
+   rejection from a generic failure.
+2. Append an `"Error:"`-prefixed entry to the LLM's `tool_history`
+   that is self-contained in natural language and ends with an
+   explicit "do not retry this tool call" directive. Weak LLMs
+   that do not recognise `code` must still back off on the text
+   alone.
+3. Evaluate loop-break conditions:
+   - `retryable: false` → break the agentic loop immediately after
+     this call, regardless of prior state;
+   - Two consecutive tool calls returning the same `code` → break.
+4. On break, the kernel SHOULD synthesise a mechanical final
+   response from a code-specific template **without another LLM
+   round-trip**. This preserves kernel truth: the user-facing final
+   message is authored by the kernel and cannot be paraphrased away
+   by a confused model.
+5. Persist a `TOOL_REJECTED` audit log entry with at minimum
+   `{code, call_id, iteration, retryable, details}`.
+
+Implementations MAY provide additional post-rejection UX (dashboard
+cards, toasts) but MUST NOT auto-elevate privileges in response to a
+rejection — see §14.7.6.
+
+#### 14.7.6 Security Considerations
+
+`reason` and `remediation_hint` are operator-visible **and** enter LLM
+context. This makes them a potential social-engineering surface: a
+compromised or sloppy server could author rejection text designed to
+nudge the operator toward granting dangerous privileges.
+
+Therefore:
+
+- Kernels MUST NOT wire rejection fields directly to privilege-changing
+  UI actions (e.g., a one-click "Enable YOLO" button derived from a
+  `remediation_hint` string). Any elevation must be a deliberate,
+  separately-surfaced operator action.
+- Dashboards SHOULD render rejection cards as informational-only
+  notifications (dismiss-and-move-on), not as interactive approval
+  prompts.
+- Audit entries MUST include the original rejection body for
+  post-incident review, since cards may be dismissed before the
+  operator notices a suspicious pattern.
+
+#### 14.7.7 Example: SelfDelegation (native)
+
+A kernel-native tool rejecting a self-delegation request:
+
+Response body (as transmitted across the wire by a kernel-style
+"external" bridge that exposes native rejections):
+
+```json
+{
+  "isError": true,
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"status\":\"rejected\",\"code\":\"SELF_DELEGATION\",\"reason\":\"Delegation target and caller are the same agent. An agent cannot delegate to itself; this is a hard logical constraint enforced by the kernel.\",\"retryable\":false}"
+    }
+  ]
+}
+```
+
+`tool_history` entry the kernel injects for the LLM:
+
+```
+Error: Delegation target and caller are the same agent. An agent cannot delegate to itself; this is a hard logical constraint enforced by the kernel.
+REMEDIATION: This rejection cannot be resolved by operator action.
+Do not retry this tool call; report the situation to the user.
+```
+
+Mechanical final response (loop breaks because `retryable: false`):
+
+```
+Inter-agent delegation was aborted: the delegation target is the same as the caller. This is a logical constraint and cannot be resolved.
+```
+
 ---
 

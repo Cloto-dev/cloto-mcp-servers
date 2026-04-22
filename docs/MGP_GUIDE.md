@@ -61,6 +61,7 @@ All paths relative to `crates/core/src/`.
 | §12 Streaming | 2+3 | Stream chunks, progress, flow control, cancellation | `managers/mcp_streaming.rs`, `managers/mcp_kernel_tool.rs` |
 | §13 Bidirectional | 2+3+4 | Event subscriptions, replay, callbacks | `managers/mcp_events.rs`, `managers/mcp_kernel_tool.rs` |
 | §14 Error Handling | — | MGP error codes (1000-5099), structured hints | `managers/mcp_mgp.rs`, `managers/mcp_protocol.rs` |
+| §14.7 Tool Rejection Envelope | 2+4 | `ToolFailure::Rejection`, `RejectionCode`, `ToolRejection`; agentic loop break + mechanical final response; `TOOL_REJECTED` audit event; external server sentinel detector | `crates/shared/src/lib.rs`, `managers/mcp_kernel_tool.rs`, `managers/mcp.rs::detect_external_rejection`, `handlers/system.rs::{compose_rejection_text, compose_rejection_final_response}` |
 | §15 Discovery | 4 | Server registry, runtime register/deregister | `managers/mcp_discovery.rs` |
 | §16 Tool Discovery | 4 | `ToolIndex`, `SessionToolCache`, LLM meta-tools | `managers/mcp_tool_discovery.rs`, `managers/mcp_kernel_tool.rs` |
 
@@ -209,6 +210,7 @@ Compliance badges: `[MGP Tier 1]` `[MGP Tier 2]` `[MGP Tier 3]` `[MGP Tier 4]`
 | 0.5.2-draft | 2026-02-28 | Second review response: sequential section numbering (§17-19), `notifications/mgp.event` added to Layer 2, kernel tool visibility rules (§16.8), §14 Layer classification, MCP comparison compressed |
 | 0.6.0-draft | 2026-03-06 | Transport layer analysis (see §18.4) + structural audit & architectural revision (see §18.5) |
 | 0.6.0-impl | 2026-03-07 | ClotoCore Tier 1-4 implementation complete: 21 kernel tools, 13 extensions, bug-182 to bug-226 fixed. New modules: `mcp_mgp.rs`, `mcp_lifecycle.rs`, `mcp_streaming.rs`, `mcp_events.rs`, `mcp_discovery.rs`, `mcp_tool_discovery.rs` |
+| 0.6.1-draft | 2026-04-22 | §14.7 Tool Rejection Envelope — structured `CallToolResult.isError` body for policy/logic refusals distinct from JSON-RPC errors, 9-variant RejectionCode registry, server opt-in semantics, kernel agentic-loop break + mechanical final response contract, security hardening against rejection-text-driven privilege escalation |
 
 ### 18.2 Expert Review Response (0.3.0 → 0.4.0)
 
