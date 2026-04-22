@@ -23,4 +23,4 @@ config = load_llm_provider_config(
 server = create_llm_mcp_server(config)
 
 if __name__ == "__main__":
-    asyncio.run(run_server(server))
+    asyncio.run(run_server(server, config))

@@ -1230,7 +1230,32 @@ async def handle_think_with_tools_streaming(config: ProviderConfig, arguments: d
 # ============================================================
 
 
-async def run_server(server: Server):
+def _build_mgp_capabilities(config: "ProviderConfig") -> dict[str, dict]:
+    """Build MGP Tier 3 capability declaration for an llm_provider-based server.
+
+    All servers that run through :func:`run_server` share the same MGP feature
+    surface — streaming chunks (§12.4), stream cancellation (§12.7 via
+    ``mcp_stream_interceptor``), and gap detection (§12.9). Declaring the
+    ``streaming`` extension here lets the kernel negotiate these features
+    without each provider server duplicating the declaration.
+
+    The returned dict is shaped ``{"mgp": {...}}`` so it can be passed to
+    :meth:`mcp.server.Server.create_initialization_options` as
+    ``experimental_capabilities`` — the kernel accepts
+    ``capabilities.experimental.mgp`` as equivalent to ``capabilities.mgp``
+    during the Python SDK transition period (MGP_SECURITY §2.3).
+    """
+    from common.mgp_utils import MgpCapabilities
+
+    mgp = MgpCapabilities()
+    mgp.set_server_id(f"cloto-mcp-{config.provider_id}")
+    mgp.require_permission("network.outbound")
+    mgp.set_trust_level("standard")
+    mgp.add_extension("streaming")
+    return mgp.as_dict()
+
+
+async def run_server(server: Server, config: "ProviderConfig | None" = None):
     """Run an MCP server over stdio with the MGP interceptor mounted.
 
     The interceptor (``common.mcp_stream_interceptor``) sits between the raw
@@ -1241,10 +1266,16 @@ async def run_server(server: Server):
 
     Non-streaming servers and non-MGP clients see identical behavior: every
     message they care about is forwarded untouched.
+
+    When ``config`` is provided, MGP Tier 3 capabilities are declared via
+    ``experimental_capabilities`` (see :func:`_build_mgp_capabilities`). Callers
+    that omit ``config`` fall back to a plain non-MGP initialize response.
     """
     import anyio
 
     from common.mcp_stream_interceptor import mgp_message_interceptor
+
+    experimental_caps = _build_mgp_capabilities(config) if config is not None else {}
 
     async with stdio_server() as (raw_read, write_stream):
         # A small buffer keeps producer (interceptor) and consumer
@@ -1260,7 +1291,10 @@ async def run_server(server: Server):
                 _active_streams,
             )
             try:
-                await server.run(inner_recv, write_stream, server.create_initialization_options())
+                init_options = server.create_initialization_options(
+                    experimental_capabilities=experimental_caps,
+                )
+                await server.run(inner_recv, write_stream, init_options)
             finally:
                 # When the server exits (EOF or error), ensure the interceptor
                 # task also terminates by cancelling the task group.
