@@ -159,7 +159,7 @@ BLOCKED_FIRST_WORD = {
 
 
 _SANDBOX_PREFIX = "[MGP Sandbox] "
-_SANDBOX_HINT = " If you need this operation, use ask_agent to delegate to an agent with appropriate permissions."
+_SANDBOX_HINT = " If you need this operation, use mgp.agent.ask to delegate to an agent with appropriate permissions."
 
 
 def _sandbox_error(reason: str) -> ValueError:
