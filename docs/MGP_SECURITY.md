@@ -113,6 +113,16 @@ activate protocol-level behavior.
 > §10 Security Invariant 3). If the server-declared value exceeds the
 > kernel-determined level, the kernel logs a warning and downgrades it.
 
+> **Note on SDK compatibility:** The Python MCP SDK
+> (`mcp.server.lowlevel.server.Server.create_initialization_options`) exposes
+> only the `experimental_capabilities` parameter as its public API for
+> declaring non-standard capabilities. Servers using this SDK MAY place the
+> `mgp` object under `capabilities.experimental.mgp` instead of
+> `capabilities.mgp`. MGP Kernel implementations SHOULD accept both
+> locations as equivalent during the Python SDK transition period. This
+> compatibility provision is informational; the canonical location remains
+> `capabilities.mgp`.
+
 ### 2.4 Negotiation Rules
 
 1. The active extension set is the **intersection** of client and server extensions
