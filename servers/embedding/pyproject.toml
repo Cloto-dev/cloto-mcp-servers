@@ -1,6 +1,6 @@
 [project]
 name = "cloto-mcp-embedding"
-version = "0.2.0"
+version = "0.3.0"
 description = "Cloto MCP Server: Vector embedding generation + index/search (local ONNX + API providers)"
 requires-python = ">=3.10"
 dependencies = [

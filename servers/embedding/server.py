@@ -43,6 +43,12 @@ EMBEDDING_TIMEOUT = int(os.environ.get("EMBEDDING_TIMEOUT_SECS", "30"))
 EMBEDDING_INDEX_ENABLED = os.environ.get("EMBEDDING_INDEX_ENABLED", "true").lower() == "true"
 EMBEDDING_INDEX_DB_PATH = os.environ.get("EMBEDDING_INDEX_DB_PATH", "data/embedding_index.db")
 
+# ONNX tokenization max sequence length (1-8192). MiniLM is clamped to 512
+# internally (positional embeddings cap). Jina-v5-nano supports up to 8192.
+ONNX_MAX_SEQ_LEN = int(os.environ.get("ONNX_MAX_SEQ_LEN", "2048"))
+if not (1 <= ONNX_MAX_SEQ_LEN <= 8192):
+    raise ValueError(f"ONNX_MAX_SEQ_LEN must be 1-8192, got {ONNX_MAX_SEQ_LEN}")
+
 # ONNX-specific — resolve relative paths against CLOTO_PROJECT_DIR when running
 # inside a sandbox (isolation changes the working directory).
 _project_dir = os.environ.get("CLOTO_PROJECT_DIR", "")
@@ -57,6 +63,46 @@ if not ONNX_MODEL_DIR:
         ONNX_MODEL_DIR = os.path.join(_project_dir, _default_model_dir)
     else:
         ONNX_MODEL_DIR = _default_model_dir
+
+
+def _select_ort_providers() -> list:
+    """Select ONNX Runtime execution providers with cross-platform fallback.
+
+    Priority when ONNX_EP_PREFERENCE is empty (auto-detect):
+      1. CoreMLExecutionProvider (macOS)
+      2. DmlExecutionProvider (Windows — preserves existing behavior)
+      3. CPUExecutionProvider (always appended as terminal fallback)
+
+    When ONNX_EP_PREFERENCE is set, use the comma-separated list but always
+    filter against get_available_providers() and always ensure CPUExecutionProvider
+    is present so session creation cannot fail for lack of any provider.
+
+    Fail-open: if onnxruntime import or get_available_providers() raises,
+    return ["CPUExecutionProvider"] so the caller can still attempt to load.
+    """
+    try:
+        import onnxruntime as ort
+
+        available = set(ort.get_available_providers())
+    except Exception:
+        return ["CPUExecutionProvider"]
+
+    preference = os.environ.get("ONNX_EP_PREFERENCE", "").strip()
+
+    if preference:
+        requested = [p.strip() for p in preference.split(",") if p.strip()]
+        providers = [p for p in requested if p in available]
+    else:
+        providers = []
+        for candidate in ("CoreMLExecutionProvider", "DmlExecutionProvider"):
+            if candidate in available:
+                providers.append(candidate)
+
+    if "CPUExecutionProvider" not in providers:
+        providers.append("CPUExecutionProvider")
+
+    return providers
+
 
 # ============================================================
 # Provider Abstraction
@@ -190,26 +236,26 @@ class OnnxMiniLMProvider(EmbeddingProvider):
                     f"Download with: python mcp-servers/embedding/download_model.py"
                 )
 
-        # Try DirectML (AMD GPU), fall back to CPU
-        providers = []
-        try:
-            available = ort.get_available_providers()
-            if "DmlExecutionProvider" in available:
-                providers.append("DmlExecutionProvider")
-                logger.info("Using DirectML (AMD GPU) for ONNX inference")
-        except Exception:
-            pass
-        providers.append("CPUExecutionProvider")
+        providers = _select_ort_providers()
 
         self._session = ort.InferenceSession(model_path, providers=providers)
         self._tokenizer = Tokenizer.from_file(tokenizer_path)
-        self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=128)
-        self._tokenizer.enable_truncation(max_length=128)
+        # MiniLM positional embeddings cap at 512 — clamp ONNX_MAX_SEQ_LEN.
+        miniml_seq_len = min(ONNX_MAX_SEQ_LEN, 512)
+        if miniml_seq_len < ONNX_MAX_SEQ_LEN:
+            logger.warning(
+                "MiniLM max_position=512, clamping ONNX_MAX_SEQ_LEN=%d to 512",
+                ONNX_MAX_SEQ_LEN,
+            )
+        self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=miniml_seq_len)
+        self._tokenizer.enable_truncation(max_length=miniml_seq_len)
 
         logger.info(
-            "ONNX MiniLM provider initialized (dir=%s, providers=%s)",
+            "ONNX MiniLM provider initialized (dir=%s, seq_len=%d, requested=%s, active=%s)",
             self._model_dir,
+            miniml_seq_len,
             providers,
+            self._session.get_providers(),
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -277,7 +323,7 @@ class OnnxJinaV5NanoProvider(EmbeddingProvider):
 
     async def initialize(self) -> None:
         try:
-            import onnxruntime as ort
+            import onnxruntime  # noqa: F401  # availability check — session is created in _create_session_with_fallback
             from tokenizers import Tokenizer
         except ImportError:
             raise ImportError(
@@ -302,28 +348,60 @@ class OnnxJinaV5NanoProvider(EmbeddingProvider):
                     f"Download with: python embedding/download_model.py --model jina-v5-nano"
                 )
 
-        # Try DirectML (AMD GPU), fall back to CPU
-        providers = []
-        try:
-            available = ort.get_available_providers()
-            if "DmlExecutionProvider" in available:
-                providers.append("DmlExecutionProvider")
-                logger.info("Using DirectML (AMD GPU) for ONNX inference")
-        except Exception:
-            pass
-        providers.append("CPUExecutionProvider")
-
-        self._session = ort.InferenceSession(model_path, providers=providers)
+        providers = _select_ort_providers()
+        self._session = self._create_session_with_fallback(model_path, providers)
         self._tokenizer = Tokenizer.from_file(tokenizer_path)
-        # jina-v5-nano supports 8K context
-        self._tokenizer.enable_padding(pad_id=0, pad_token="<pad>", length=512)
-        self._tokenizer.enable_truncation(max_length=512)
+        # jina-v5-nano supports up to 8K context via RoPE.
+        self._tokenizer.enable_padding(pad_id=0, pad_token="<pad>", length=ONNX_MAX_SEQ_LEN)
+        self._tokenizer.enable_truncation(max_length=ONNX_MAX_SEQ_LEN)
 
         logger.info(
-            "ONNX Jina-v5-nano provider initialized (dir=%s, providers=%s)",
+            "ONNX Jina-v5-nano provider initialized (dir=%s, seq_len=%d, requested=%s, active=%s)",
             self._model_dir,
+            ONNX_MAX_SEQ_LEN,
             providers,
+            self._session.get_providers(),
         )
+
+    def _create_session_with_fallback(self, model_path: str, providers: list):
+        """Create InferenceSession with CoreML-aware 3-stage fallback.
+
+        Stage 1: CoreML with MLProgram + dynamic shapes (ort 1.18+). Required
+                 for Jina's variable seq_len + external-data (model.onnx_data).
+        Stage 2: CoreML without provider_options (ort version mismatch tolerance).
+        Stage 3: CPU only (guaranteed fallback).
+
+        When CoreML is not in the list, skip straight to plain session creation.
+        """
+        import onnxruntime as ort
+
+        if "CoreMLExecutionProvider" in providers:
+            rest = [p for p in providers if p != "CoreMLExecutionProvider"]
+            providers_with_opts = [
+                (
+                    "CoreMLExecutionProvider",
+                    {
+                        "ModelFormat": "MLProgram",
+                        "MLComputeUnits": "ALL",
+                        "RequireStaticInputShapes": "0",
+                    },
+                ),
+                *rest,
+            ]
+            try:
+                return ort.InferenceSession(model_path, providers=providers_with_opts)
+            except Exception as e:
+                logger.warning(
+                    "CoreML init with provider_options failed, retrying without options: %s",
+                    e,
+                )
+            try:
+                return ort.InferenceSession(model_path, providers=providers)
+            except Exception as e:
+                logger.warning("CoreML plain init failed, falling back to CPU-only: %s", e)
+            return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+
+        return ort.InferenceSession(model_path, providers=providers)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not self._session or not self._tokenizer:
@@ -348,15 +426,10 @@ class OnnxJinaV5NanoProvider(EmbeddingProvider):
         outputs = self._session.run(None, inputs)
         token_embeddings = outputs[0]  # (batch, seq_len, hidden_dim=768)
 
-        # Last-Token pooling: extract the last non-padding token's embedding
-        batch_size = token_embeddings.shape[0]
-        hidden_dim = token_embeddings.shape[2]
-        last_token_embs = np.zeros((batch_size, hidden_dim), dtype=np.float32)
-
-        for i in range(batch_size):
-            seq_len = int(np.sum(attention_mask[i]))
-            last_idx = max(seq_len - 1, 0)
-            last_token_embs[i] = token_embeddings[i, last_idx]
+        # Last-Token pooling (vectorized): gather embedding at the last non-padding token per row.
+        last_indices = np.maximum(np.sum(attention_mask, axis=1) - 1, 0).astype(np.int64)
+        batch_indices = np.arange(token_embeddings.shape[0])
+        last_token_embs = token_embeddings[batch_indices, last_indices].astype(np.float32, copy=False)
 
         # L2 normalization
         norms = np.linalg.norm(last_token_embs, axis=1, keepdims=True)
@@ -921,6 +994,87 @@ async def handle_purge_tool(arguments: dict) -> dict:
 # ============================================================
 
 
+async def _run_streamable_http() -> None:
+    """Run embedding as a Streamable HTTP MCP server (no stdio, no REST /embed).
+
+    Enabled by setting EMBEDDING_TRANSPORT=streamable-http. Listens on
+    EMBEDDING_MCP_HTTP_PORT (default 8403) and mounts the MCP endpoint at
+    /embedding/mcp and /embedding so it can coexist with other services
+    behind path-based reverse proxies.
+    """
+    global _provider, _vector_index
+
+    import contextlib
+    from collections.abc import AsyncIterator
+
+    import uvicorn
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.middleware.cors import CORSMiddleware
+    from starlette.routing import Mount
+
+    _provider = create_provider()
+    await _provider.initialize()
+
+    if EMBEDDING_INDEX_ENABLED:
+        _vector_index = VectorIndex(EMBEDDING_INDEX_DB_PATH)
+        await _vector_index.initialize()
+
+    session_manager = StreamableHTTPSessionManager(
+        app=registry.server,
+        stateless=True,
+    )
+
+    async def mcp_endpoint(scope, receive, send):
+        await session_manager.handle_request(scope, receive, send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        async with session_manager.run():
+            logger.info("Embedding Streamable HTTP server ready")
+            yield
+
+    app = Starlette(
+        routes=[
+            Mount("/embedding/mcp", app=mcp_endpoint),
+            Mount("/embedding", app=mcp_endpoint),
+            Mount("/mcp", app=mcp_endpoint),
+            Mount("/", app=mcp_endpoint),
+        ],
+        middleware=[
+            Middleware(
+                CORSMiddleware,
+                allow_origins=["https://claude.ai", "https://www.claude.ai"],
+                allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+                allow_headers=[
+                    "Authorization",
+                    "Content-Type",
+                    "Mcp-Session-Id",
+                    "Mcp-Protocol-Version",
+                    "Last-Event-Id",
+                ],
+                expose_headers=["Mcp-Session-Id"],
+            ),
+        ],
+        lifespan=lifespan,
+    )
+
+    host = os.environ.get("EMBEDDING_MCP_HTTP_HOST", "0.0.0.0")
+    port = int(os.environ.get("EMBEDDING_MCP_HTTP_PORT", "8403"))
+    logger.info("Starting Embedding Streamable HTTP MCP on %s:%d", host, port)
+
+    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    try:
+        await server.serve()
+    finally:
+        if _vector_index:
+            await _vector_index.shutdown()
+        await _provider.shutdown()
+        logger.info("Embedding Streamable HTTP server shut down")
+
+
 async def main():
     global _provider, _vector_index
 
@@ -928,6 +1082,11 @@ async def main():
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
+
+    transport = os.environ.get("EMBEDDING_TRANSPORT", "stdio")
+    if transport == "streamable-http":
+        await _run_streamable_http()
+        return
 
     logger.info(
         "Starting embedding server (provider=%s, http_port=%d, index=%s)",

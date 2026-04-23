@@ -55,12 +55,22 @@
       "name": "Embedding",
       "description": "Vector embedding generation + index/search (local ONNX + API providers)",
       "category": "tool",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "directory": "embedding",
       "dependencies": ["common"],
       "env_vars": [
         { "key": "EMBEDDING_PROVIDER", "default": "api_openai", "description": "Embedding provider" },
-        { "key": "EMBEDDING_HTTP_PORT", "default": "8401", "description": "HTTP server port" }
+        { "key": "EMBEDDING_HTTP_PORT", "default": "8401", "description": "HTTP server port" },
+        {
+          "key": "ONNX_EP_PREFERENCE",
+          "default": "",
+          "description": "ONNX execution provider preference (comma-separated). Empty = auto-detect (CoreML on macOS, DirectML on Windows, CPU otherwise). Unknown providers are silently dropped; CPU is always ensured as terminal fallback."
+        },
+        {
+          "key": "ONNX_MAX_SEQ_LEN",
+          "default": "2048",
+          "description": "Max tokenization sequence length (1-8192). MiniLM is clamped to 512 internally. Jina-v5-nano supports up to 8192."
+        }
       ],
       "optional_env_vars": [],
       "tags": ["core", "embedding", "vector"],
