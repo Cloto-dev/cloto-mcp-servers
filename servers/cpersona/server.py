@@ -108,6 +108,11 @@ AUTOCUT_ENABLED = os.environ.get("CPERSONA_AUTOCUT_ENABLED", "false").lower() ==
 RECALL_MODE = os.environ.get("CPERSONA_RECALL_MODE", "rrf")  # rrf | cascade
 RRF_K = max(1, int(os.environ.get("CPERSONA_RRF_K", "60")))
 RRF_THRESHOLD_FACTOR = float(os.environ.get("CPERSONA_RRF_THRESHOLD_FACTOR", "0.5"))
+# v2.4.12: Max theoretical _rrf_score ≈ num_retrievers / (RRF_K + 1).
+# With 3 retrievers (vector, FTS episodes, FTS memories) at rank 0 each.
+# Used by _apply_quality_gate to map cosine-scale min_score (0.2–1.0) into the
+# RRF score's tight range (0–~0.05).
+RRF_MAX_SCALE = 3.0 / (RRF_K + 1)
 
 # ============================================================
 # Embedding Client
@@ -951,34 +956,85 @@ def _apply_quality_gate(
     min_score: float,
     memory_count: int,
 ) -> list[dict]:
-    """Adaptive quality gate — removes results below dynamic threshold.
+    """Adaptive quality gate — remove results below a dynamic threshold.
+
+    Score priority (v2.4.12):
+    1. ``_confidence_score`` — 0–1, normalized by ``_compute_confidence``
+    2. ``_cosine`` — 0–1, raw cosine similarity from vector search
+    3. ``_rrf_score`` — ~0–0.05 scale; threshold is scaled by ``RRF_MAX_SCALE``
+       to align with the cosine-scale ``min_score``
+    4. Unscored (no score at all) → volume rule (``memory_count >= 100``)
 
     Rules:
-    1. Scored results: _confidence_score or _rrf_score or _cosine < min_score → exclude
-    2. Profile injection: skip if memory_count < 50 (profile dominates with sparse data)
-    3. Unscored results (keyword/FTS only): keep only if memory_count >= 100
+    1. Scored results excluded if score < ``min_score``
+       (RRF uses the scaled threshold ``min_score * RRF_MAX_SCALE``)
+    2. Profile injection (``id == -1``): skip if ``memory_count < 50``
+    3. Unscored results kept only if ``memory_count >= 100``
+
+    v2.4.12 fix: previously ``_rrf_score`` was selected via falsy-chain before
+    ``_cosine``, causing the RRF-scale value (0.01–0.05) to be compared against
+    the cosine-scale ``min_score`` (0.2–1.0) → every RRF-mode result rejected.
+    Cascade mode (no ``_rrf_score`` on rows) is unaffected.
     """
     if not results:
         return results
 
     filtered = []
+    stats = {"confidence": 0, "cosine": 0, "rrf": 0, "unscored": 0, "profile": 0, "blocked": 0}
+
     for r in results:
-        # Profile — gate by memory count
+        # Profile — gate by memory count (unchanged)
         if r.get("id") == -1:  # profile sentinel
             if memory_count >= 50:
                 filtered.append(r)
+                stats["profile"] += 1
+            else:
+                stats["blocked"] += 1
             continue
 
-        # Get the best available score
-        score = r.get("_confidence_score") or r.get("_rrf_score") or r.get("_cosine")
+        confidence = r.get("_confidence_score")
+        cosine = r.get("_cosine")
+        rrf = r.get("_rrf_score")
 
-        if score is not None:
-            if score >= min_score:
+        if confidence is not None:
+            if confidence >= min_score:
                 filtered.append(r)
+                stats["confidence"] += 1
+            else:
+                stats["blocked"] += 1
+        elif cosine is not None:
+            if cosine >= min_score:
+                filtered.append(r)
+                stats["cosine"] += 1
+            else:
+                stats["blocked"] += 1
+        elif rrf is not None:
+            # RRF scale (~0–0.05) does not match cosine-scale min_score; rescale.
+            if rrf >= min_score * RRF_MAX_SCALE:
+                filtered.append(r)
+                stats["rrf"] += 1
+            else:
+                stats["blocked"] += 1
         else:
-            # Unscored result (keyword/FTS without cosine)
+            # Unscored (cascade FTS/keyword without confidence) — volume rule
             if memory_count >= 100:
                 filtered.append(r)
+                stats["unscored"] += 1
+            else:
+                stats["blocked"] += 1
+
+    logger.debug(
+        "quality_gate: in=%d out=%d (conf=%d cos=%d rrf=%d uns=%d prof=%d) min_score=%.3f count=%d",
+        len(results),
+        len(filtered),
+        stats["confidence"],
+        stats["cosine"],
+        stats["rrf"],
+        stats["unscored"],
+        stats["profile"],
+        min_score,
+        memory_count,
+    )
 
     return filtered
 

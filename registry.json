@@ -255,8 +255,8 @@
       "name": "CPersona Memory",
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.4.11",
-      "changelog": "Hotfix: delete_memory / update_memory / lock_memory / unlock_memory were silently no-ops on aiosqlite 0.22 because of a non-existent `execute_fetchone` call. All four now use `execute_fetchall` so writes actually reach the DB.",
+      "version": "2.4.12",
+      "changelog": "Fix: adaptive quality gate now picks score priority confidence > cosine > rrf, and scales RRF threshold to match its ~0-0.05 range. The v2.4.6 gate silently blocked every vector-matched row in RRF mode because the falsy-chain selected _rrf_score before _cosine, and RRF values were compared against a cosine-scale threshold (0.2-1.0). Cascade-mode behaviour is unchanged.",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [
