@@ -18,11 +18,13 @@ import pytest
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
+import common.llm_provider as llm_provider
 from common.llm_provider import (
     ProviderConfig,
     _extract_tool_calls_from_text,
     _model_suggests_reasoning,
     _strip_reasoning_artifacts,
+    build_chat_messages,
     handle_think_with_tools,
     load_llm_provider_config,
     parse_chat_think_result,
@@ -441,3 +443,103 @@ def test_config_loader_unknown_model_falls_back_to_default(monkeypatch):
     monkeypatch.setenv("TESTP_MODEL", "gpt-4o")
     cfg = load_llm_provider_config(prefix="TESTP", display_name="Test", default_reasoning_prefill=True)
     assert cfg.reasoning_think_prefill is True
+
+
+# ── build_chat_messages (xml_user_prefix mode, v2.4.13) ──
+
+_AGENT = {"id": "agent.test", "name": "Test", "description": "test agent", "metadata": {}}
+_MSG = {"content": "hello", "source": {"type": "User", "name": "Taro"}, "metadata": {}}
+
+
+def _mem(content, ts="2026-04-01T10:00:00+09:00", source_type="User"):
+    return {
+        "content": content,
+        "timestamp": ts,
+        "source": {"type": source_type, "name": "Taro"},
+    }
+
+
+def _conv(content):
+    return {"content": content, "source": {"type": "User"}, "context_type": "conversation"}
+
+
+def test_bcm_xml_mode_no_memory(monkeypatch):
+    """No memories → user message has no XML block."""
+    monkeypatch.setattr(llm_provider, "_MEMORY_INJECTION_MODE", "xml_user_prefix")
+    msgs = build_chat_messages(_AGENT, _MSG, context=[])
+    user = msgs[-1]
+    assert user["role"] == "user"
+    assert "<background_memories>" not in user["content"]
+
+
+def test_bcm_xml_mode_injects_block(monkeypatch):
+    """Memories present → user content contains <background_memories> block."""
+    monkeypatch.setattr(llm_provider, "_MEMORY_INJECTION_MODE", "xml_user_prefix")
+    msgs = build_chat_messages(_AGENT, _MSG, context=[_mem("パンを食べた")])
+    user = msgs[-1]
+    assert user["role"] == "user"
+    assert "<background_memories>" in user["content"]
+    assert "パンを食べた" in user["content"]
+    assert "</background_memories>" in user["content"]
+
+
+def test_bcm_xml_mode_no_standalone_memory_turns(monkeypatch):
+    """XML mode: no intermediate role=user/assistant turns from memories."""
+    monkeypatch.setattr(llm_provider, "_MEMORY_INJECTION_MODE", "xml_user_prefix")
+    msgs = build_chat_messages(_AGENT, _MSG, context=[_mem("memory1"), _mem("memory2")])
+    # Only the final user message should have role=user (from the actual message)
+    user_turns = [m for m in msgs[1:] if m["role"] == "user"]
+    assert len(user_turns) == 1
+    assert "<background_memories>" in user_turns[0]["content"]
+
+
+def test_bcm_xml_mode_timestamp_in_block(monkeypatch):
+    """Timestamp is embedded inside the XML block."""
+    monkeypatch.setattr(llm_provider, "_MEMORY_INJECTION_MODE", "xml_user_prefix")
+    msgs = build_chat_messages(_AGENT, _MSG, context=[_mem("content", ts="2026-04-01T10:00:00+09:00")])
+    user_content = msgs[-1]["content"]
+    assert "2026-04-01" in user_content
+
+
+def test_bcm_xml_mode_agent_labeled(monkeypatch):
+    """Agent-source memory gets [agent] label inside the block."""
+    monkeypatch.setattr(llm_provider, "_MEMORY_INJECTION_MODE", "xml_user_prefix")
+    msgs = build_chat_messages(_AGENT, _MSG, context=[_mem("bot reply", source_type="Agent")])
+    user_content = msgs[-1]["content"]
+    assert "[agent]" in user_content
+
+
+def test_bcm_xml_mode_user_content_appended(monkeypatch):
+    """Actual user message content follows the XML block after two newlines."""
+    monkeypatch.setattr(llm_provider, "_MEMORY_INJECTION_MODE", "xml_user_prefix")
+    msgs = build_chat_messages(_AGENT, _MSG, context=[_mem("memory")])
+    user_content = msgs[-1]["content"]
+    assert "</background_memories>\n\n" in user_content
+    assert user_content.endswith("hello")
+
+
+def test_bcm_chat_mode_legacy_turns(monkeypatch):
+    """chat mode: intermediate role=user/assistant turns appear (legacy behaviour)."""
+    monkeypatch.setattr(llm_provider, "_MEMORY_INJECTION_MODE", "chat")
+    msgs = build_chat_messages(_AGENT, _MSG, context=[_mem("パンを食べた")])
+    roles = [m["role"] for m in msgs]
+    # Should have a user turn for the memory before the final user message
+    assert roles.count("user") >= 2
+
+
+def test_bcm_conversation_msgs_unchanged(monkeypatch):
+    """context_type=conversation messages stay as chat turns in xml mode."""
+    monkeypatch.setattr(llm_provider, "_MEMORY_INJECTION_MODE", "xml_user_prefix")
+    msgs = build_chat_messages(_AGENT, _MSG, context=[_conv("recent channel msg")])
+    # Conversation turn should appear as a chat turn, not in the user XML block
+    conv_turns = [m for m in msgs if m.get("content") == "recent channel msg"]
+    assert len(conv_turns) == 1
+    assert conv_turns[0]["role"] == "user"
+
+
+def test_bcm_xml_no_memory_no_injection(monkeypatch):
+    """xml mode with empty context → user message is clean (no XML prefix)."""
+    monkeypatch.setattr(llm_provider, "_MEMORY_INJECTION_MODE", "xml_user_prefix")
+    msgs = build_chat_messages(_AGENT, _MSG, context=[])
+    user = msgs[-1]
+    assert user["content"] == "[Taro]: hello"

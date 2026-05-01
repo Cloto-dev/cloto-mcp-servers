@@ -37,6 +37,14 @@ _mgp_stream_requested: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # gap-retransmission. Dropped chunks result in a gap_unrecoverable notification.
 _CHUNK_BUFFER_MAX: int = 100
 
+# Memory injection mode for build_chat_messages().
+# "xml_user_prefix" (default): pack recalled memories into a <background_memories>
+#   XML block prepended to the user message — prevents topic-drift by making it
+#   clear to the LLM that memories are reference material, not active chat turns.
+# "chat": legacy behaviour — insert memories as interleaved role=user/assistant
+#   chat turns (kept for rollback via CLOTO_MEMORY_INJECTION=chat).
+_MEMORY_INJECTION_MODE: str = os.environ.get("CLOTO_MEMORY_INJECTION", "xml_user_prefix")
+
 
 @dataclass
 class StreamState:
@@ -358,7 +366,8 @@ def build_chat_messages(
     memory_msgs = [m for m in context if m.get("context_type") != "conversation"]
     conversation_msgs = [m for m in context if m.get("context_type") == "conversation"]
 
-    if memory_msgs:
+    if memory_msgs and _MEMORY_INJECTION_MODE == "chat":
+        # Legacy: insert memories as interleaved chat turns (rollback path).
         messages.append(
             {
                 "role": "system",
@@ -370,7 +379,6 @@ def build_chat_messages(
         )
         for msg in memory_msgs:
             role, content = _context_msg_to_role_content(msg)
-            # Inject timestamp as system-level framing (not embedded in content)
             ts = msg.get("timestamp", "")
             if ts and role != "system":
                 ts_label = _parse_context_timestamp(ts)
@@ -383,6 +391,7 @@ def build_chat_messages(
                 "content": "[End of recalled memories.]",
             }
         )
+    # xml_user_prefix: memories accumulated into XML block, injected into user message below
 
     if conversation_msgs:
         messages.append(
@@ -461,9 +470,29 @@ def build_chat_messages(
         user_name = source.get("name", "")
     user_content = message.get("content", "")
     if user_name and user_name not in ("User", ""):
-        messages.append({"role": "user", "content": f"[{user_name}]: {user_content}"})
+        raw_user = f"[{user_name}]: {user_content}"
     else:
-        messages.append({"role": "user", "content": user_content})
+        raw_user = user_content
+
+    if memory_msgs and _MEMORY_INJECTION_MODE != "chat":
+        # xml_user_prefix: pack memories into a <background_memories> block
+        # prepended to the user message so the LLM treats them as reference
+        # material rather than active conversation turns (anti-topic-drift).
+        xml_lines = [
+            "<background_memories>",
+            "<!-- Recalled memories from past conversations. NOT part of the current conversation. Time references may be outdated. -->",
+        ]
+        for msg in memory_msgs:
+            role, content = _context_msg_to_role_content(msg)
+            ts = msg.get("timestamp", "")
+            ts_label = _parse_context_timestamp(ts) if ts else None
+            prefix = f"[{ts_label}] " if ts_label else ""
+            src_label = "[agent] " if role == "assistant" else ""
+            xml_lines.append(f"{prefix}{src_label}{content}")
+        xml_lines.append("</background_memories>")
+        messages.append({"role": "user", "content": "\n".join(xml_lines) + "\n\n" + raw_user})
+    else:
+        messages.append({"role": "user", "content": raw_user})
     return messages
 
 

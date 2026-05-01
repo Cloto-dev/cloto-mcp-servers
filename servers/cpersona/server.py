@@ -101,8 +101,9 @@ CALIBRATE_SAMPLE_SIZE = int(os.environ.get("CPERSONA_CALIBRATE_SAMPLE_SIZE", "20
 CALIBRATE_Z_FACTOR = float(os.environ.get("CPERSONA_CALIBRATE_Z_FACTOR", "1.0"))
 CALIBRATE_FLOOR = float(os.environ.get("CPERSONA_CALIBRATE_FLOOR", "0.05"))
 
-# Autocut (v2.4)
-AUTOCUT_ENABLED = os.environ.get("CPERSONA_AUTOCUT_ENABLED", "false").lower() == "true"
+# Autocut (v2.4 / v2.4.13: relative gap ratio, enabled by default)
+AUTOCUT_ENABLED = os.environ.get("CPERSONA_AUTOCUT_ENABLED", "true").lower() == "true"
+AUTOCUT_MIN_GAP_RATIO = float(os.environ.get("CPERSONA_AUTOCUT_MIN_GAP_RATIO", "0.15"))
 
 # Recall mode (v2.4)
 RECALL_MODE = os.environ.get("CPERSONA_RECALL_MODE", "rrf")  # rrf | cascade
@@ -921,16 +922,21 @@ async def _recall_rrf(
 def _autocut(results: list[dict]) -> list[dict]:
     """Detect the largest score gap in results and cut below it (Weaviate autocut).
 
-    Looks at _rrf_score (RRF mode) or _cosine (cascade mode) to find a
-    natural breakpoint in the score distribution. Results after the largest
-    gap are removed as noise.
+    v2.4.13: Uses relative gap ratio (gap / max_score) instead of absolute gap
+    to work correctly across both RRF (~0-0.05) and cosine (0-1.0) score scales.
+    Gaps below AUTOCUT_MIN_GAP_RATIO of the top score are treated as uniform
+    noise and ignored to prevent over-truncation on evenly-distributed results.
     """
     if len(results) < 2:
         return results
     scores = [r.get("_rrf_score") or r.get("_cosine") or 0 for r in results]
-    gaps = [scores[i] - scores[i + 1] for i in range(len(scores) - 1)]
-    if not gaps or max(gaps) <= 0:
+    max_score = scores[0]
+    if max_score <= 0:
         return results
+    gaps = [scores[i] - scores[i + 1] for i in range(len(scores) - 1)]
+    max_gap = max(gaps)
+    if max_gap / max_score < AUTOCUT_MIN_GAP_RATIO:
+        return results  # no meaningful breakpoint
     cut_idx = max(range(len(gaps)), key=lambda i: gaps[i]) + 1
     return results[:cut_idx]
 

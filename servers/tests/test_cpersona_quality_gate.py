@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, "cpersona")
 
-from server import _adaptive_min_score, _apply_quality_gate  # noqa: E402, I001
+from server import _adaptive_min_score, _apply_quality_gate, _autocut  # noqa: E402, I001
 
 
 # ── _adaptive_min_score ──
@@ -190,3 +190,92 @@ def test_quality_gate_mixed_results():
     ids = [r["id"] for r in filtered]
     assert 1 in ids
     assert -1 in ids
+
+
+# ── _autocut (v2.4.13 relative gap ratio) ──
+
+
+def _r(cosine=None, rrf=None):
+    """Helper: build a minimal result dict with the given score fields."""
+    r = {"id": 1, "content": "x"}
+    if cosine is not None:
+        r["_cosine"] = cosine
+    if rrf is not None:
+        r["_rrf_score"] = rrf
+    return r
+
+
+def test_autocut_bread_vs_pi_case():
+    """Canonical case: cosine 0.59 (bread) vs 0.31 (raspberry pi) — ratio 0.47 → cut."""
+    results = [_r(cosine=0.59), _r(cosine=0.31)]
+    assert len(_autocut(results)) == 1
+    assert _autocut(results)[0]["_cosine"] == 0.59
+
+
+def test_autocut_uniform_no_cut():
+    """Evenly distributed scores — ratio 0.02 < 0.15 → no cut."""
+    results = [_r(cosine=0.50), _r(cosine=0.49), _r(cosine=0.48)]
+    assert _autocut(results) == results
+
+
+def test_autocut_rrf_scale_large_gap():
+    """RRF scale: [0.048, 0.030] — ratio 0.375 → cut to first."""
+    results = [_r(rrf=0.048), _r(rrf=0.030)]
+    assert len(_autocut(results)) == 1
+    assert _autocut(results)[0]["_rrf_score"] == 0.048
+
+
+def test_autocut_rrf_scale_no_cut():
+    """RRF scale, uniform — ratio ~0.04 → no cut."""
+    results = [_r(rrf=0.048), _r(rrf=0.046), _r(rrf=0.044)]
+    assert _autocut(results) == results
+
+
+def test_autocut_single_result():
+    """Single result always returned unchanged."""
+    results = [_r(cosine=0.80)]
+    assert _autocut(results) == results
+
+
+def test_autocut_empty():
+    """Empty list returned unchanged."""
+    assert _autocut([]) == []
+
+
+def test_autocut_zero_max_score():
+    """All-zero scores — no cut."""
+    results = [_r(cosine=0.0), _r(cosine=0.0)]
+    assert _autocut(results) == results
+
+
+def test_autocut_gap_ratio_below_threshold():
+    """Gap ratio exactly at boundary (< 0.15) → no cut."""
+    # gap=0.05, max=0.50, ratio=0.10 < 0.15
+    results = [_r(cosine=0.50), _r(cosine=0.45)]
+    assert _autocut(results) == results
+
+
+def test_autocut_uses_cosine_when_no_rrf():
+    """Falls back to _cosine when _rrf_score is absent."""
+    results = [_r(cosine=0.70), _r(cosine=0.30)]
+    cut = _autocut(results)
+    assert len(cut) == 1
+    assert cut[0]["_cosine"] == 0.70
+
+
+def test_autocut_uses_rrf_when_present():
+    """Uses _rrf_score (takes priority via `or` chain) when present."""
+    results = [_r(rrf=0.045, cosine=0.90), _r(rrf=0.020, cosine=0.85)]
+    # rrf scores: [0.045, 0.020], ratio = 0.025/0.045 = 0.56 → cut
+    cut = _autocut(results)
+    assert len(cut) == 1
+    assert cut[0]["_rrf_score"] == 0.045
+
+
+def test_autocut_three_results_cut_at_largest_gap():
+    """Three results: [0.80, 0.78, 0.40] — largest gap after index 1 → keep first two."""
+    results = [_r(cosine=0.80), _r(cosine=0.78), _r(cosine=0.40)]
+    cut = _autocut(results)
+    assert len(cut) == 2
+    assert cut[0]["_cosine"] == 0.80
+    assert cut[1]["_cosine"] == 0.78
