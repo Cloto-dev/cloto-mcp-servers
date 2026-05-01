@@ -105,6 +105,12 @@ CALIBRATE_FLOOR = float(os.environ.get("CPERSONA_CALIBRATE_FLOOR", "0.05"))
 AUTOCUT_ENABLED = os.environ.get("CPERSONA_AUTOCUT_ENABLED", "true").lower() == "true"
 AUTOCUT_MIN_GAP_RATIO = float(os.environ.get("CPERSONA_AUTOCUT_MIN_GAP_RATIO", "0.15"))
 
+# Contextual Query Biasing (v2.4.15)
+# Prepend recent conversation context to the vector search query to bias
+# the embedding toward the current topic. FTS paths are unaffected.
+CONTEXT_QUERY_ENABLED   = os.environ.get("CPERSONA_CONTEXT_QUERY_ENABLED",  "false").lower() == "true"
+CONTEXT_QUERY_MAX_CHARS = int(os.environ.get("CPERSONA_CONTEXT_QUERY_MAX_CHARS", "200"))
+
 # Episode boundary soft penalty (L3 — v2.4.14)
 # Memories created before the latest archived episode are penalised by a
 # multiplicative factor so cross-session noise is filtered by the quality gate.
@@ -796,6 +802,7 @@ async def _recall_cascade(
     deep: bool,
     channel: str = "",
     exclude_set: set[str] | None = None,
+    embed_query: str = "",
 ) -> list[dict]:
     """Original cascading recall: stages fill remaining slots sequentially."""
     results: list[dict] = []
@@ -804,7 +811,7 @@ async def _recall_cascade(
 
     # Strategy 0: Vector search
     if _embedding_client and query.strip():
-        vector_results = await _search_vector(db, agent_id, query, limit, channel=channel)
+        vector_results = await _search_vector(db, agent_id, query, limit, channel=channel, embed_query=embed_query)
         for row in vector_results:
             rid = row.get("_rid", row["id"])
             if rid not in seen_ids and not _content_excluded(row["content"], _excl):
@@ -856,6 +863,7 @@ async def _recall_rrf(
     deep: bool,
     channel: str = "",
     exclude_set: set[str] | None = None,
+    embed_query: str = "",
 ) -> list[dict]:
     """v2.4 RRF recall: run vector and FTS5 independently, merge with
     Reciprocal Rank Fusion. Avoids cascade's positional bias.
@@ -871,7 +879,7 @@ async def _recall_rrf(
     # Phase 3: RRF mode relaxes the similarity threshold for broader coverage
     rrf_min_sim = VECTOR_MIN_SIMILARITY * RRF_THRESHOLD_FACTOR
     if _embedding_client:
-        vector_results = await _search_vector(db, agent_id, query, limit, min_similarity=rrf_min_sim, channel=channel)
+        vector_results = await _search_vector(db, agent_id, query, limit, min_similarity=rrf_min_sim, channel=channel, embed_query=embed_query)
         for rank, row in enumerate(vector_results):
             if _content_excluded(row.get("content", ""), _excl):
                 continue
@@ -924,6 +932,21 @@ async def _recall_rrf(
         )
 
     return results
+
+
+def _build_context_query(query: str, context_hint: str) -> str:
+    """Prepend conversation context to the vector search query (CQB, v2.4.15).
+
+    Pure function: returns the original query unchanged when context_hint is
+    empty or whitespace-only. Truncates from the tail (most recent content)
+    when hint exceeds CONTEXT_QUERY_MAX_CHARS.
+    The caller is responsible for checking CONTEXT_QUERY_ENABLED.
+    """
+    hint = context_hint.strip()
+    if not hint:
+        return query
+    hint = hint[-CONTEXT_QUERY_MAX_CHARS:]
+    return f"{hint}\n{query}"
 
 
 def _episode_boundary_factor(
@@ -1093,6 +1116,7 @@ async def do_recall(
     deep: bool = False,
     channel: str = "",
     exclude_contents: list | None = None,
+    context_hint: str = "",
 ) -> dict:
     """Recall relevant memories using multi-strategy search.
 
@@ -1114,10 +1138,13 @@ async def do_recall(
     if exclude_contents:
         exclude_set = {c.strip().lower() for c in exclude_contents if c.strip()}
 
+    # Stage 0: build context-biased embedding query (FTS uses original `query`)
+    embed_query = _build_context_query(query, context_hint)
+
     if RECALL_MODE == "rrf" and query.strip():
-        results = await _recall_rrf(db, agent_id, query, limit, deep, channel, exclude_set)
+        results = await _recall_rrf(db, agent_id, query, limit, deep, channel, exclude_set, embed_query=embed_query)
     else:
-        results = await _recall_cascade(db, agent_id, query, limit, deep, channel, exclude_set)
+        results = await _recall_cascade(db, agent_id, query, limit, deep, channel, exclude_set, embed_query=embed_query)
 
     # v2.4.4: Compute time range for dynamic decay + fetch recall counts
     time_range_hours = 0.0
@@ -1261,8 +1288,19 @@ async def do_recall_with_context(
     # Auto-build exclude_contents from external_context
     exclude_list = [e["content"].strip().lower() for e in ctx if e.get("content", "").strip()]
 
+    # Auto-derive context_hint from recent user utterances for CQB (v2.4.15)
+    context_hint = ""
+    if CONTEXT_QUERY_ENABLED and ctx:
+        recent_user = [
+            e["content"].strip()
+            for e in ctx
+            if e.get("role") == "user" and e.get("content", "").strip()
+        ]
+        context_hint = " ".join(recent_user[-3:])
+
     # Run normal recall with exclusion
-    recall_result = await do_recall(agent_id, query, limit, deep=deep, channel=channel, exclude_contents=exclude_list)
+    recall_result = await do_recall(agent_id, query, limit, deep=deep, channel=channel,
+                                    exclude_contents=exclude_list, context_hint=context_hint)
     messages = recall_result.get("messages", [])
 
     # Convert external_context entries to the same message format
@@ -1307,6 +1345,7 @@ async def _search_vector(
     limit: int,
     min_similarity: float | None = None,
     channel: str = "",
+    embed_query: str = "",
 ) -> list[dict]:
     """Search memories and episodes using vector cosine similarity."""
 
@@ -1318,7 +1357,7 @@ async def _search_vector(
                 f"{base_url}/search",
                 json={
                     "namespace": f"cpersona:{agent_id}",
-                    "query": query,
+                    "query": embed_query or query,
                     "limit": limit,
                     "min_similarity": VECTOR_MIN_SIMILARITY,
                 },
@@ -1380,7 +1419,8 @@ async def _search_vector(
     import numpy as np
 
     # 1. Compute query embedding
-    embeddings = await _embedding_client.embed([query])
+    _eq = embed_query if embed_query else query
+    embeddings = await _embedding_client.embed([_eq])
     if not embeddings or not embeddings[0]:
         return []
     query_vec = np.array(embeddings[0], dtype=np.float32)
@@ -2554,6 +2594,12 @@ registry.auto_tool(
                 "description": "Normalized content strings to exclude from results (starts-with match). "
                 "Used to prevent duplication with conversation context already known to the caller.",
             },
+            "context_hint": {
+                "type": "string",
+                "description": "Recent conversation context prepended to the vector search query "
+                "to bias the embedding toward the current topic (CQB). "
+                "Leave empty for unbiased search (default).",
+            },
         },
         "required": ["agent_id", "query"],
     },
@@ -2565,6 +2611,7 @@ registry.auto_tool(
         ("deep", bool, False),
         ("channel", str, ""),
         ("exclude_contents", list, []),
+        ("context_hint", str, ""),
     ],
     annotations=ToolAnnotations(readOnlyHint=True),
 )

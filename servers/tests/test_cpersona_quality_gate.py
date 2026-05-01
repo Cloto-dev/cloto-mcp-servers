@@ -7,7 +7,8 @@ sys.path.insert(0, "cpersona")
 import math
 from datetime import datetime, timezone, timedelta
 
-from server import _adaptive_min_score, _apply_quality_gate, _autocut, _episode_boundary_factor  # noqa: E402, I001
+from server import _adaptive_min_score, _apply_quality_gate, _autocut, _build_context_query, _episode_boundary_factor  # noqa: E402, I001
+from server import CONTEXT_QUERY_MAX_CHARS
 
 
 # ── _adaptive_min_score ──
@@ -346,3 +347,35 @@ def test_episode_penalty_raspi_case():
     factor = _episode_boundary_factor(_mem_ts(24), _NOW)
     penalised = 0.327 * factor
     assert penalised < 0.271  # below quality gate threshold
+
+
+# ── _build_context_query (v2.4.15 CQB) ──
+
+
+def test_build_context_query_basic():
+    """Context hint + query → newline-separated combination."""
+    result = _build_context_query("この前のパンの話覚えてる?", "パン屋さん 朝食")
+    assert result == "パン屋さん 朝食\nこの前のパンの話覚えてる?"
+
+
+def test_build_context_query_empty_hint():
+    """Empty or whitespace-only hint → original query unchanged."""
+    assert _build_context_query("クエリ", "") == "クエリ"
+    assert _build_context_query("クエリ", "   ") == "クエリ"
+
+
+def test_build_context_query_truncation():
+    """Hint longer than MAX_CHARS is truncated from the tail."""
+    long_hint = "a" * (CONTEXT_QUERY_MAX_CHARS + 50)
+    result = _build_context_query("q", long_hint)
+    # Tail (most recent content) should survive
+    tail = "a" * CONTEXT_QUERY_MAX_CHARS
+    assert result == f"{tail}\nq"
+    assert len(result.split("\n")[0]) == CONTEXT_QUERY_MAX_CHARS
+
+
+def test_build_context_query_exact_max_chars():
+    """Hint exactly MAX_CHARS long is not truncated."""
+    exact_hint = "x" * CONTEXT_QUERY_MAX_CHARS
+    result = _build_context_query("q", exact_hint)
+    assert result == f"{exact_hint}\nq"
