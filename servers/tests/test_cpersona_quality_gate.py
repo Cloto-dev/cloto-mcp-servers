@@ -4,7 +4,10 @@ import sys
 
 sys.path.insert(0, "cpersona")
 
-from server import _adaptive_min_score, _apply_quality_gate, _autocut  # noqa: E402, I001
+import math
+from datetime import datetime, timezone, timedelta
+
+from server import _adaptive_min_score, _apply_quality_gate, _autocut, _episode_boundary_factor  # noqa: E402, I001
 
 
 # ── _adaptive_min_score ──
@@ -279,3 +282,67 @@ def test_autocut_three_results_cut_at_largest_gap():
     assert len(cut) == 2
     assert cut[0]["_cosine"] == 0.80
     assert cut[1]["_cosine"] == 0.78
+
+
+# ── _episode_boundary_factor (v2.4.14) ──
+
+_NOW = datetime(2026, 4, 24, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _boundary(hours_ago: float) -> datetime:
+    return _NOW - timedelta(hours=hours_ago)
+
+
+def _mem_ts(hours_before_boundary: float, boundary: datetime = _NOW) -> str:
+    dt = boundary - timedelta(hours=hours_before_boundary)
+    return dt.isoformat()
+
+
+def test_episode_penalty_current_session_no_decay():
+    """Memory after the boundary (current session) → factor=1.0."""
+    boundary = _NOW
+    mem_ts = (boundary + timedelta(hours=1)).isoformat()
+    assert _episode_boundary_factor(mem_ts, boundary) == 1.0
+
+
+def test_episode_penalty_at_boundary_no_decay():
+    """Memory exactly at the boundary → factor=1.0 (>= boundary passes)."""
+    assert _episode_boundary_factor(_NOW.isoformat(), _NOW) == 1.0
+
+
+def test_episode_penalty_24h_before():
+    """24h before boundary → exp(-0.01 × 24) ≈ 0.787."""
+    factor = _episode_boundary_factor(_mem_ts(24), _NOW)
+    assert abs(factor - math.exp(-0.01 * 24)) < 1e-6
+
+
+def test_episode_penalty_floor_clamp():
+    """Very old memory (1000h) → clamped at EPISODE_DECAY_FLOOR=0.5."""
+    factor = _episode_boundary_factor(_mem_ts(1000), _NOW)
+    assert factor == 0.5  # default EPISODE_DECAY_FLOOR
+
+
+def test_episode_penalty_no_boundary():
+    """episode_boundary_ts=None → factor=1.0 (penalty disabled)."""
+    assert _episode_boundary_factor("2026-04-01T00:00:00+00:00", None) == 1.0
+
+
+def test_episode_penalty_no_timestamp():
+    """memory_ts_str=None → factor=1.0 (missing timestamp)."""
+    assert _episode_boundary_factor(None, _NOW) == 1.0
+
+
+def test_episode_penalty_empty_timestamp():
+    """Empty timestamp string → factor=1.0."""
+    assert _episode_boundary_factor("", _NOW) == 1.0
+
+
+def test_episode_penalty_raspi_case():
+    """Canonical case: raspberry pi memory 24h before boundary.
+
+    Original cosine 0.327, threshold 0.271.
+    Penalised cosine 0.327 × 0.787 = 0.257 < 0.271 → would be filtered.
+    """
+    factor = _episode_boundary_factor(_mem_ts(24), _NOW)
+    penalised = 0.327 * factor
+    assert penalised < 0.271  # below quality gate threshold

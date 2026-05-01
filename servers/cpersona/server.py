@@ -105,6 +105,13 @@ CALIBRATE_FLOOR = float(os.environ.get("CPERSONA_CALIBRATE_FLOOR", "0.05"))
 AUTOCUT_ENABLED = os.environ.get("CPERSONA_AUTOCUT_ENABLED", "true").lower() == "true"
 AUTOCUT_MIN_GAP_RATIO = float(os.environ.get("CPERSONA_AUTOCUT_MIN_GAP_RATIO", "0.15"))
 
+# Episode boundary soft penalty (L3 — v2.4.14)
+# Memories created before the latest archived episode are penalised by a
+# multiplicative factor so cross-session noise is filtered by the quality gate.
+EPISODE_PENALTY_ENABLED = os.environ.get("CPERSONA_EPISODE_PENALTY_ENABLED", "true").lower() == "true"
+EPISODE_DECAY_RATE  = float(os.environ.get("CPERSONA_EPISODE_DECAY_RATE",  "0.01"))
+EPISODE_DECAY_FLOOR = float(os.environ.get("CPERSONA_EPISODE_DECAY_FLOOR", "0.5"))
+
 # Recall mode (v2.4)
 RECALL_MODE = os.environ.get("CPERSONA_RECALL_MODE", "rrf")  # rrf | cascade
 RRF_K = max(1, int(os.environ.get("CPERSONA_RRF_K", "60")))
@@ -919,6 +926,40 @@ async def _recall_rrf(
     return results
 
 
+def _episode_boundary_factor(
+    memory_ts_str: str | None,
+    episode_boundary_ts: "datetime | None",
+) -> float:
+    """Multiplicative decay for memories preceding the latest episode boundary.
+
+    Returns 1.0 for memories within or after the boundary (current session).
+    Returns exponential decay in [EPISODE_DECAY_FLOOR, 1.0) for older memories,
+    so cross-session noise is weakened relative to current-session memories.
+    """
+    if not memory_ts_str or episode_boundary_ts is None:
+        return 1.0
+    mem_dt = _parse_timestamp_utc(memory_ts_str)
+    if mem_dt is None or mem_dt >= episode_boundary_ts:
+        return 1.0
+    hours_before = (episode_boundary_ts - mem_dt).total_seconds() / 3600
+    return max(EPISODE_DECAY_FLOOR, math.exp(-EPISODE_DECAY_RATE * hours_before))
+
+
+async def _get_episode_boundary_ts(db, agent_id: str) -> "datetime | None":
+    """Return the latest episode's created_at as the current-session boundary.
+
+    Used by the episode boundary penalty to distinguish current-session
+    memories (no penalty) from prior-session memories (decayed score).
+    """
+    rows = await db.execute_fetchall(
+        "SELECT created_at FROM episodes WHERE agent_id=? ORDER BY created_at DESC LIMIT 1",
+        (agent_id,),
+    )
+    if not rows or not rows[0][0]:
+        return None
+    return _parse_timestamp_utc(rows[0][0])
+
+
 def _autocut(results: list[dict]) -> list[dict]:
     """Detect the largest score gap in results and cut below it (Weaviate autocut).
 
@@ -1101,6 +1142,19 @@ async def do_recall(
                 mem_ids,
             )
             recall_counts = {r[0]: (r[1], r[2] or "") for r in rc_rows}
+
+    # v2.4.14: Episode boundary soft penalty (L3) — weaken cross-session memories
+    # before quality gate so current-session signals take precedence.
+    if EPISODE_PENALTY_ENABLED and results:
+        episode_boundary_ts = await _get_episode_boundary_ts(db, agent_id)
+        if episode_boundary_ts is not None:
+            for r in results:
+                factor = _episode_boundary_factor(r.get("timestamp"), episode_boundary_ts)
+                if factor < 1.0:
+                    if "_cosine" in r:
+                        r["_cosine"] = r["_cosine"] * factor
+                    if "_rrf_score" in r:
+                        r["_rrf_score"] = r["_rrf_score"] * factor
 
     # v2.3.2+: Re-rank by confidence score before truncation (if enabled)
     if CONFIDENCE_ENABLED:
