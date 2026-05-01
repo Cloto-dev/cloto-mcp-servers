@@ -255,8 +255,8 @@
       "name": "CPersona Memory",
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.4.13",
-      "changelog": "Fix: AUTOCUT enabled by default with relative gap ratio (gap/max_score >= 0.15) — works correctly across RRF (~0-0.05) and cosine (0-1.0) scales; prevents over-truncation on uniform distributions. Fix: memory presentation format changed from interleaved chat turns to XML-fenced user-message prefix (<background_memories>) to prevent topic-drift contamination (L2 variant B). AB test confirmed -38 pp severe drift reduction (45% → 7%). Both fixes are env-var rollback-safe: CPERSONA_AUTOCUT_ENABLED=false / CLOTO_MEMORY_INJECTION=chat.",
+      "version": "2.4.14",
+      "changelog": "Fix: episode boundary soft penalty (L3) — memories from before the latest archived episode receive an exponential score decay (exp(-0.01*hours), floor 0.5) applied to _cosine/_rrf_score before the quality gate, so cross-session noise is weakened relative to current-session signals. AB test (3-arm): A-v12 47.6% → C-v13 7.1% → D-v14 4.8% severe drift; no regression vs v2.4.13. Rollback: CPERSONA_EPISODE_PENALTY_ENABLED=false.",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [
