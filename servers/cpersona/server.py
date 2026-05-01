@@ -108,8 +108,9 @@ AUTOCUT_MIN_GAP_RATIO = float(os.environ.get("CPERSONA_AUTOCUT_MIN_GAP_RATIO", "
 # Contextual Query Biasing (v2.4.15)
 # Prepend recent conversation context to the vector search query to bias
 # the embedding toward the current topic. FTS paths are unaffected.
-CONTEXT_QUERY_ENABLED   = os.environ.get("CPERSONA_CONTEXT_QUERY_ENABLED",  "false").lower() == "true"
-CONTEXT_QUERY_MAX_CHARS = int(os.environ.get("CPERSONA_CONTEXT_QUERY_MAX_CHARS", "200"))
+CONTEXT_QUERY_ENABLED        = os.environ.get("CPERSONA_CONTEXT_QUERY_ENABLED",  "false").lower() == "true"
+CONTEXT_QUERY_MAX_CHARS      = int(os.environ.get("CPERSONA_CONTEXT_QUERY_MAX_CHARS", "200"))
+CONTEXT_QUERY_SIM_THRESHOLD  = float(os.environ.get("CPERSONA_CONTEXT_QUERY_SIM_THRESHOLD", "0.25"))
 
 # Episode boundary soft penalty (L3 — v2.4.14)
 # Memories created before the latest archived episode are penalised by a
@@ -1288,15 +1289,27 @@ async def do_recall_with_context(
     # Auto-build exclude_contents from external_context
     exclude_list = [e["content"].strip().lower() for e in ctx if e.get("content", "").strip()]
 
-    # Auto-derive context_hint from recent user utterances for CQB (v2.4.15)
+    # CQB semantic filter: embed query (cached) + batch-embed context messages (1 call),
+    # then keep only messages with cos >= CONTEXT_QUERY_SIM_THRESHOLD.
+    # Total cost: 2 embedding calls regardless of context length (O(1) not O(N)).
+    # The LRU-cached query embedding is reused by _search_vector at zero cost.
     context_hint = ""
-    if CONTEXT_QUERY_ENABLED and ctx:
-        recent_user = [
-            e["content"].strip()
-            for e in ctx
+    if CONTEXT_QUERY_ENABLED and ctx and _embedding_client:
+        import numpy as _np
+        q_embs = await _embedding_client.embed([query])   # cached → reused in _search_vector
+        user_msgs = [
+            e["content"].strip() for e in ctx
             if e.get("role") == "user" and e.get("content", "").strip()
         ]
-        context_hint = " ".join(recent_user[-3:])
+        if q_embs and q_embs[0] and user_msgs:
+            q_vec = _np.array(q_embs[0], dtype=_np.float32)
+            c_embs = await _embedding_client.embed(user_msgs)  # single batch call
+            if c_embs:
+                filtered = [
+                    msg for msg, emb in zip(user_msgs, c_embs)
+                    if emb and float(_np.dot(q_vec, _np.array(emb, dtype=_np.float32))) >= CONTEXT_QUERY_SIM_THRESHOLD
+                ]
+                context_hint = " ".join(filtered[-3:])
 
     # Run normal recall with exclusion
     recall_result = await do_recall(agent_id, query, limit, deep=deep, channel=channel,
