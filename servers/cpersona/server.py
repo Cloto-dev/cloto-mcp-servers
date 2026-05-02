@@ -67,6 +67,15 @@ EMBEDDING_MODEL = os.environ.get("CPERSONA_EMBEDDING_MODEL", "text-embedding-3-s
 # Vector search threshold (cosine similarity, 0.0-1.0)
 VECTOR_MIN_SIMILARITY = float(os.environ.get("CPERSONA_VECTOR_MIN_SIMILARITY", "0.3"))
 
+# Per-agent threshold overrides (populated by calibrate_threshold / auto-calibrate on startup)
+_agent_thresholds: dict[str, float] = {}
+
+
+def _get_vector_threshold(agent_id: str) -> float:
+    """Return per-agent threshold when available, otherwise the global default."""
+    return _agent_thresholds.get(agent_id, VECTOR_MIN_SIMILARITY)
+
+
 # Embedding cache (query deduplication)
 EMBEDDING_CACHE_SIZE = int(os.environ.get("CPERSONA_EMBEDDING_CACHE_SIZE", "256"))
 EMBEDDING_CACHE_TTL = int(os.environ.get("CPERSONA_EMBEDDING_CACHE_TTL", "300"))  # seconds
@@ -878,7 +887,7 @@ async def _recall_rrf(
 
     # --- Retriever 1: Vector search (independent, up to limit) ---
     # Phase 3: RRF mode relaxes the similarity threshold for broader coverage
-    rrf_min_sim = VECTOR_MIN_SIMILARITY * RRF_THRESHOLD_FACTOR
+    rrf_min_sim = _get_vector_threshold(agent_id) * RRF_THRESHOLD_FACTOR
     if _embedding_client:
         vector_results = await _search_vector(db, agent_id, query, limit, min_similarity=rrf_min_sim, channel=channel, embed_query=embed_query)
         for rank, row in enumerate(vector_results):
@@ -1372,7 +1381,7 @@ async def _search_vector(
                     "namespace": f"cpersona:{agent_id}",
                     "query": embed_query or query,
                     "limit": limit,
-                    "min_similarity": VECTOR_MIN_SIMILARITY,
+                    "min_similarity": _get_vector_threshold(agent_id),
                 },
             )
             resp.raise_for_status()
@@ -1438,7 +1447,7 @@ async def _search_vector(
         return []
     query_vec = np.array(embeddings[0], dtype=np.float32)
     query_dim = len(query_vec)
-    effective_min_sim = min_similarity if min_similarity is not None else VECTOR_MIN_SIMILARITY
+    effective_min_sim = min_similarity if min_similarity is not None else _get_vector_threshold(agent_id)
 
     candidates: list[tuple[float, dict]] = []
     scan_limit = min(MAX_MEMORIES, max(limit * 10, 100))
@@ -2078,11 +2087,17 @@ async def do_calibrate_threshold(agent_id: str, sample_size: int = 0, z_factor: 
     sample_n = sample_size or CALIBRATE_SAMPLE_SIZE
     z = z_factor or CALIBRATE_Z_FACTOR
 
-    # Sample random embeddings from this agent's memories
-    rows = await db.execute_fetchall(
-        "SELECT embedding FROM memories WHERE agent_id = ? AND embedding IS NOT NULL ORDER BY RANDOM() LIMIT ?",
-        (agent_id, sample_n),
-    )
+    # Sample embeddings: per-agent when agent_id provided, all-agents when empty
+    if agent_id:
+        rows = await db.execute_fetchall(
+            "SELECT embedding FROM memories WHERE agent_id = ? AND embedding IS NOT NULL ORDER BY RANDOM() LIMIT ?",
+            (agent_id, sample_n),
+        )
+    else:
+        rows = await db.execute_fetchall(
+            "SELECT embedding FROM memories WHERE embedding IS NOT NULL ORDER BY RANDOM() LIMIT ?",
+            (sample_n,),
+        )
 
     if len(rows) < 10:
         return {"ok": False, "error": f"Need at least 10 embeddings, found {len(rows)}"}
@@ -2103,7 +2118,7 @@ async def do_calibrate_threshold(agent_id: str, sample_size: int = 0, z_factor: 
     pairwise_sims = sim_matrix[triu_indices]
 
     num_pairs = len(pairwise_sims)
-    old_threshold = VECTOR_MIN_SIMILARITY
+    old_threshold = _get_vector_threshold(agent_id)
 
     # Compute statistics
     sim_mean = float(np.mean(pairwise_sims))
@@ -2112,13 +2127,17 @@ async def do_calibrate_threshold(agent_id: str, sample_size: int = 0, z_factor: 
 
     # z-score based threshold: mean - z * std (lower tail), with floor
     z_threshold = sim_mean - z * sim_std
-    new_threshold = max(z_threshold, CALIBRATE_FLOOR)
+    new_threshold = round(max(z_threshold, CALIBRATE_FLOOR), 4)
 
-    # Apply
-    VECTOR_MIN_SIMILARITY = round(new_threshold, 4)
+    # Apply: per-agent dict when agent_id provided, global fallback when empty
+    if agent_id:
+        _agent_thresholds[agent_id] = new_threshold
+    else:
+        VECTOR_MIN_SIMILARITY = new_threshold
 
     result = {
         "ok": True,
+        "scope": "per_agent" if agent_id else "global",
         "agent_id": agent_id,
         "sampled_embeddings": n,
         "num_pairs": num_pairs,
@@ -2129,12 +2148,13 @@ async def do_calibrate_threshold(agent_id: str, sample_size: int = 0, z_factor: 
             "median": round(sim_median, 4),
         },
         "old_threshold": old_threshold,
-        "new_threshold": VECTOR_MIN_SIMILARITY,
+        "new_threshold": new_threshold,
     }
     logger.info(
-        "Calibrated VECTOR_MIN_SIMILARITY: %.4f → %.4f (z=%.1f of %d pairs, mean=%.4f, std=%.4f)",
+        "Calibrated threshold [%s]: %.4f → %.4f (z=%.1f of %d pairs, mean=%.4f, std=%.4f)",
+        agent_id or "global",
         old_threshold,
-        VECTOR_MIN_SIMILARITY,
+        new_threshold,
         z,
         num_pairs,
         sim_mean,
@@ -3638,6 +3658,32 @@ async def main():
 
     # Initialize DB on startup
     await get_db()
+
+    # Auto-calibrate threshold on startup if enabled
+    if AUTO_CALIBRATE and EMBEDDING_MODE != "none":
+        db = await get_db()
+        # Phase 1: global threshold from all-agents corpus
+        global_result = await do_calibrate_threshold(agent_id="")
+        if global_result.get("ok"):
+            logger.info(
+                "Auto-calibrate global: %.4f → %.4f",
+                global_result["old_threshold"],
+                global_result["new_threshold"],
+            )
+        # Phase 2: per-agent thresholds for each agent with sufficient embeddings
+        agent_rows = await db.execute_fetchall(
+            "SELECT DISTINCT agent_id FROM memories WHERE embedding IS NOT NULL"
+        )
+        for (aid,) in agent_rows:
+            result = await do_calibrate_threshold(agent_id=aid)
+            if result.get("ok"):
+                logger.info(
+                    "Auto-calibrate %s: %.4f → %.4f",
+                    aid,
+                    result["old_threshold"],
+                    result["new_threshold"],
+                )
+            # agents with < 10 embeddings are silently skipped (result["ok"] is False)
 
     # Start background task queue (Phase 5)
     if TASK_QUEUE_ENABLED:

@@ -35,14 +35,14 @@
       "id": "bug-003",
       "title": "calibrate_threshold modifies global VECTOR_MIN_SIMILARITY without agent isolation",
       "severity": "HIGH",
-      "status": "open",
+      "status": "fixed",
       "file": "servers/cpersona/server.py",
-      "description": "do_calibrate_threshold() writes to the global VECTOR_MIN_SIMILARITY variable. In a multi-agent environment, calibrating for agent A changes the threshold for all subsequent recall calls including agent B. The threshold should be per-agent or protected by a lock.",
+      "description": "do_calibrate_threshold() writes to the global VECTOR_MIN_SIMILARITY variable. In a multi-agent environment, calibrating for agent A changes the threshold for all subsequent recall calls including agent B. Fixed by _agent_thresholds dict + _get_vector_threshold() — recall uses per-agent value, global is only updated when agent_id is empty.",
       "expected": "present",
       "check": {
         "type": "grep",
         "file": "servers/cpersona/server.py",
-        "pattern": "global VECTOR_MIN_SIMILARITY"
+        "pattern": "_get_vector_threshold"
       }
     },
     {

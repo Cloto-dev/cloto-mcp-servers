@@ -8,6 +8,7 @@ import math
 from datetime import datetime, timezone, timedelta
 
 from server import _adaptive_min_score, _apply_quality_gate, _autocut, _build_context_query, _episode_boundary_factor  # noqa: E402, I001
+from server import _get_vector_threshold, _agent_thresholds, VECTOR_MIN_SIMILARITY
 from server import CONTEXT_QUERY_MAX_CHARS
 
 
@@ -379,3 +380,41 @@ def test_build_context_query_exact_max_chars():
     exact_hint = "x" * CONTEXT_QUERY_MAX_CHARS
     result = _build_context_query("q", exact_hint)
     assert result == f"{exact_hint}\nq"
+
+
+# ── _get_vector_threshold (per-agent dict) ──
+
+
+def test_get_vector_threshold_falls_back_to_global():
+    """Agent not in dict → global VECTOR_MIN_SIMILARITY returned."""
+    _agent_thresholds.pop("__test_agent_fallback__", None)
+    assert _get_vector_threshold("__test_agent_fallback__") == VECTOR_MIN_SIMILARITY
+
+
+def test_get_vector_threshold_returns_per_agent_value():
+    """Agent in dict → dict value returned, not global."""
+    _agent_thresholds["__test_agent_custom__"] = 0.1234
+    try:
+        assert _get_vector_threshold("__test_agent_custom__") == 0.1234
+        assert _get_vector_threshold("__test_agent_custom__") != VECTOR_MIN_SIMILARITY
+    finally:
+        _agent_thresholds.pop("__test_agent_custom__", None)
+
+
+def test_get_vector_threshold_empty_agent_id_falls_back_to_global():
+    """Empty string is not a valid agent key — falls back to global."""
+    _agent_thresholds.pop("", None)
+    assert _get_vector_threshold("") == VECTOR_MIN_SIMILARITY
+
+
+def test_get_vector_threshold_independent_per_agent():
+    """Two agents can hold different thresholds independently."""
+    _agent_thresholds["__test_a__"] = 0.20
+    _agent_thresholds["__test_b__"] = 0.35
+    try:
+        assert _get_vector_threshold("__test_a__") == 0.20
+        assert _get_vector_threshold("__test_b__") == 0.35
+        assert _get_vector_threshold("__test_c__") == VECTOR_MIN_SIMILARITY
+    finally:
+        _agent_thresholds.pop("__test_a__", None)
+        _agent_thresholds.pop("__test_b__", None)
