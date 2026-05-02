@@ -255,8 +255,8 @@
       "name": "CPersona Memory",
       "description": "Persistent character persona memory with FTS5 search, vector index, and anti-contamination",
       "category": "memory",
-      "version": "2.4.14",
-      "changelog": "Fix: episode boundary soft penalty (L3) — memories from before the latest archived episode receive an exponential score decay (exp(-0.01*hours), floor 0.5) applied to _cosine/_rrf_score before the quality gate, so cross-session noise is weakened relative to current-session signals. AB test (3-arm): A-v12 47.6% → C-v13 7.1% → D-v14 4.8% severe drift; no regression vs v2.4.13. Rollback: CPERSONA_EPISODE_PENALTY_ENABLED=false.",
+      "version": "2.4.15",
+      "changelog": "Feat: per-agent threshold dict (_agent_thresholds) + startup auto-calibration. calibrate_threshold now writes per-agent values instead of clobbering the global, recall uses _get_vector_threshold(agent_id) with global fallback. CPERSONA_AUTO_CALIBRATE=true runs Phase1 (all-agents global) + Phase2 (per-agent) on startup. Fix: validate_float added to _VALIDATORS (KeyError crash on calibrate_threshold call). Benchmark (controlled 3-arm, clean 19-item corpus): v2412 2.4% → v2413 0.0% → v2414 2.4% severe drift (XML fence is primary driver; episode penalty neutral on short sessions).",
       "directory": "cpersona",
       "dependencies": ["common"],
       "env_vars": [
