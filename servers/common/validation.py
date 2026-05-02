@@ -41,6 +41,20 @@ def validate_dict(arguments: dict, key: str, default: dict | None = None) -> dic
     return val
 
 
+def validate_float(arguments: dict, key: str, default: float = 0.0) -> float:
+    """Extract a float value, returning *default* if missing or wrong type.
+
+    Accepts both ``float`` and ``int`` (JSON integers are valid float inputs).
+    ``bool`` is explicitly excluded.
+    """
+    val = arguments.get(key, default)
+    if isinstance(val, bool):
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    return default
+
+
 def validate_list(arguments: dict, key: str, default: list | None = None) -> list:
     """Extract a list value, returning *default* (or ``[]``) if missing or wrong type."""
     if default is None:

@@ -88,6 +88,20 @@
       }
     },
     {
+      "id": "bug-008",
+      "title": "calibrate_threshold crashes with KeyError(float) — float missing from _VALIDATORS",
+      "severity": "HIGH",
+      "status": "fixed",
+      "file": "servers/common/mcp_utils.py",
+      "description": "auto_tool() dispatches parameters via _VALIDATORS[typ]. The float type was never registered, so calibrate_threshold (which uses z_factor: float) raised KeyError(float) on every call. str(KeyError(float)) returns \"<class 'float'>\", surfaced as {\"error\": \"<class 'float'>\"}. Fixed by adding validate_float to validation.py and registering it in _VALIDATORS.",
+      "expected": "present",
+      "check": {
+        "type": "grep",
+        "file": "servers/common/mcp_utils.py",
+        "pattern": "float: validate_float"
+      }
+    },
+    {
       "id": "bug-007",
       "title": "No callback idempotency check — duplicate callback responses silently ignored as not_found",
       "severity": "MEDIUM",

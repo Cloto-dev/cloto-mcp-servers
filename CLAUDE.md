@@ -2,7 +2,9 @@
 
 ## Mandatory Reads
 
-- **`docs/MGP_SPEC.md`** -- MGP protocol (strict MCP superset). Read before changing protocol handling.
+Read these before making changes. Do not summarize — read the actual files (feedback_doc_firsthand_reading).
+
+- **`docs/MGP_SPEC.md`** — MGP protocol (strict MCP superset). Read before changing protocol handling.
 
 ## Commands
 
@@ -31,15 +33,14 @@
 
 ## Bug Verification (Anti-Hallucination)
 
-The issue registry is a **hallucination prevention tool**, not a comprehensive bug tracker.
-It verifies that reported bugs actually exist in the codebase via grep patterns.
-Not every bug fix requires an issue-registry entry -- only bugs where code-level
-evidence is needed to confirm existence (e.g., AI-discovered bugs that could be false positives).
+> Inherits: `../CLAUDE.md` — "Mandatory: Issue Registry Verification" section.
+> MUST run `bash scripts/verify-issues.sh` when adding / fixing / claiming a fix for
+> entries in `qa/issue-registry.json`. PostToolUse hook auto-runs on edits;
+> `.githooks/pre-commit` blocks commits with `[STALE]` / `[UNFIXED]`.
 
 - Source of truth: `qa/issue-registry.json`
-- Discovery: add entry -> `bash scripts/verify-issues.sh` -> must return `[VERIFIED]`
-- Fix: update `expected`->`"absent"`, `status`->`"fixed"` -> re-verify -> must return `[FIXED]`
-- `scripts/verify-issues.sh` is **read-only infrastructure** -- never modify without user approval
+- Scope: bugs where code-level evidence is needed (e.g., AI-discovered bugs that could be false positives). Not every fix needs an entry.
+- **Enable pre-commit blocker (once per clone)**: `bash scripts/install-hooks.sh` — sets `core.hooksPath=.githooks`. Baseline: clean as of 2026-04-24 (all 7 entries `[VERIFIED]`).
 
 ## Adding a New MCP Server
 
@@ -55,11 +56,8 @@ Consumed via `mcp.toml`'s `[paths].servers` with `${servers}/terminal/server.py`
 
 ## Git Rules
 
-- Commit messages in English
-- Git author: `ClotoCore Project <ClotoCore@proton.me>`
-- Do NOT push without explicit user permission — commit is allowed, but `git push` requires a separate explicit instruction (e.g. "push", "pushして"). Never bundle push into a commit command.
+> Inherits: `../CLAUDE.md` — shared Git Rules section (author, English commits, push = explicit instruction only, never bundle push into commit).
 
 ## Prohibited
 
 - Do NOT remove tests without updating `qa/test-baseline.json`
-- Do NOT modify `scripts/verify-issues.sh` without user approval

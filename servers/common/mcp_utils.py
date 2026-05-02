@@ -11,7 +11,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool, ToolAnnotations
 
-from common.validation import validate_bool, validate_dict, validate_int, validate_list, validate_str
+from common.validation import validate_bool, validate_dict, validate_float, validate_int, validate_list, validate_str
 
 
 class _MgpValidationFilter(logging.Filter):
@@ -52,6 +52,7 @@ _VALIDATORS: dict[type, Callable] = {
     bool: validate_bool,
     str: validate_str,
     int: validate_int,
+    float: validate_float,
     dict: validate_dict,
     list: validate_list,
 }

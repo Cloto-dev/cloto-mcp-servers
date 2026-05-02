@@ -1,6 +1,6 @@
 """Tests for common.validation helpers."""
 
-from common.validation import validate_dict, validate_int, validate_list, validate_str
+from common.validation import validate_dict, validate_float, validate_int, validate_list, validate_str
 
 # ── validate_str ──────────────────────────────────────────────
 
@@ -54,6 +54,44 @@ def test_int_bool_excluded():
     """bool is a subclass of int — must be rejected."""
     assert validate_int({"k": True}, "k", 0) == 0
     assert validate_int({"k": False}, "k", 5) == 5
+
+
+# ── validate_float ────────────────────────────────────────────
+
+
+def test_float_normal():
+    assert validate_float({"k": 1.5}, "k") == 1.5
+
+
+def test_float_from_int():
+    """JSON integers must be accepted and converted to float."""
+    assert validate_float({"k": 2}, "k") == 2.0
+    assert isinstance(validate_float({"k": 2}, "k"), float)
+
+
+def test_float_zero():
+    assert validate_float({"k": 0.0}, "k", 9.9) == 0.0
+
+
+def test_float_negative():
+    assert validate_float({"k": -3.14}, "k") == -3.14
+
+
+def test_float_missing_returns_default():
+    assert validate_float({}, "k") == 0.0
+    assert validate_float({}, "k", 1.5) == 1.5
+
+
+def test_float_wrong_type_returns_default():
+    assert validate_float({"k": "1.5"}, "k", 9.9) == 9.9
+    assert validate_float({"k": None}, "k", 9.9) == 9.9
+    assert validate_float({"k": [1.0]}, "k", 9.9) == 9.9
+
+
+def test_float_bool_excluded():
+    """bool is a subclass of int — must be rejected."""
+    assert validate_float({"k": True}, "k", 0.0) == 0.0
+    assert validate_float({"k": False}, "k", 5.0) == 5.0
 
 
 # ── validate_dict ─────────────────────────────────────────────
