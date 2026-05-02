@@ -43,10 +43,49 @@ python3 cpersona_ab_runner.py --agent agent.cpersona_bench --trials 3
 - **MILD**: 汚染キーワードあり、ただし文脈内で軽く言及のみ
 - **SEVERE**: 汚染キーワードあり + 詳細化（質問・感情表現・3回以上言及）
 
-## Historical results
+## Results
 
-| Version | Condition | Severe% |
+### Controlled arm comparison (2026-05-02, clean corpus, N=42/arm)
+
+Same codebase (v2.4.14), same corpus (19 items), same agent (`agent.cpersona_bench`).
+Only the feature flags differ between arms — this isolates the pure contribution of each feature.
+
+| Arm | Features | Severe% | Latency |
+|---|---|---|---|
+| v2412 | chat-turn format only | 2.4% (1/42) | 10.1s |
+| **v2413** | **AUTOCUT + XML fence** | **0.0% (0/42)** | 10.1s |
+| v2414 | + episode boundary penalty | 2.4% (1/42) | 9.5s |
+
+Per-category breakdown (sev%):
+
+| Category | v2412 | v2413 | v2414 |
+|---|---|---|---|
+| drift_trigger (パン→ラズベリー) | 0% | 0% | 0% |
+| reverse (ラズベリー→パン) | 0% | 0% | 0% |
+| keyword | 11% | 0% | 11% |
+| meta | 0% | 0% | 0% |
+| specific | 0% | 0% | 0% |
+| false_pos | 0% | 0% | 0% |
+
+**Key finding**: v2.4.13's XML fence + AUTOCUT combination is the primary driver of drift
+elimination. The episode boundary penalty (v2.4.14) is neutral on this clean short-session
+corpus — its benefit is expected to show on longer accumulated sessions with episode history.
+
+### Original AB report (2026-04-24, contaminated DB, N=42/arm)
+
+These numbers are NOT directly comparable to the controlled results above.
+The original test used `agent.cloto_default` with 108 mixed memories and included
+the v2.4.12 quality-gate bug (RRF scale mismatch that blocked all vector results).
+
+| Arm | Condition | Severe% |
 |---|---|---|
-| A-v12 (v2.4.12) | baseline | 23.1% |
-| C-xml (v2.4.13) | AUTOCUT + XML fence | 7.1% |
-| v2.4.14 | per-agent threshold | TBD (benchmark corpus v2) |
+| A-v245 | simulate v2.4.5 | 28.2% |
+| A-v12 | v2.4.12 (gate fix only) | 23.1% |
+| C-xml | v2.4.13 (AUTOCUT + XML) | 7.1% |
+
+### Rubric v2 notes
+
+- Responses that explicitly disclaim "no relevant memory found" and then list corpus
+  items are classified as **MILD** (not SEVERE) — this was a false-positive source in v1.
+- `false_pos` query `週末の予定` was replaced with `筋トレの話` because the bread corpus
+  contains "週末にパンを焼く" causing legitimate semantic overlap.
