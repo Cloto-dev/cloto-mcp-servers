@@ -53,10 +53,20 @@ ARMS = {
         },
     },
     "v2414": {
-        "label": "v2.4.14 current — XML fence + AUTOCUT + episode penalty + per-agent threshold",
+        "label": "v2.4.14 — XML fence + AUTOCUT + episode penalty (global threshold)",
         "env": {
             **BASE_ENV,
             # all defaults: xml_user_prefix, autocut=true, episode_penalty=true
+            # per-agent threshold NOT active (AUTO_CALIBRATE=false default)
+        },
+    },
+    "v2415": {
+        "label": "v2.4.15 — + per-agent threshold via CPERSONA_AUTO_CALIBRATE=true",
+        "env": {
+            **BASE_ENV,
+            # all v2414 defaults plus auto-calibrate on startup
+            # CPersona computes per-agent threshold for each agent from their corpus
+            "CPERSONA_AUTO_CALIBRATE": "true",
         },
     },
 }

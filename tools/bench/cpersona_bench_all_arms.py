@@ -2,7 +2,7 @@
 """
 CPersona multi-arm comparative benchmark.
 
-Runs v2412 → v2413 → v2414 sequentially, each with a clean corpus reset.
+Runs v2412 → v2413 → v2414 → v2415 sequentially, each with a clean corpus reset.
 Produces a side-by-side comparison table at the end.
 
 Usage:
@@ -18,12 +18,13 @@ from pathlib import Path
 
 BENCH_DIR = Path(__file__).parent
 DEFAULT_AGENT = "agent.cpersona_bench"
-DEFAULT_ARMS  = ["v2412", "v2413", "v2414"]
+DEFAULT_ARMS  = ["v2412", "v2413", "v2414", "v2415"]
 
 ARM_LABELS = {
     "v2412": "v2.4.12 (chat-turn baseline)",
     "v2413": "v2.4.13 (AUTOCUT + XML fence)",
-    "v2414": "v2.4.14 (+ episode penalty)",
+    "v2414": "v2.4.14 (+ episode penalty, global threshold)",
+    "v2415": "v2.4.15 (+ per-agent threshold, AUTO_CALIBRATE)",
 }
 
 
@@ -135,7 +136,7 @@ def main():
     p.add_argument("--trials", type=int, default=3)
     p.add_argument("--agent", default=DEFAULT_AGENT)
     p.add_argument("--arms", default=",".join(DEFAULT_ARMS),
-                   help="Comma-separated arm names (default: v2412,v2413,v2414)")
+                   help="Comma-separated arm names (default: v2412,v2413,v2414,v2415)")
     args = p.parse_args()
 
     arms = [a.strip() for a in args.arms.split(",")]
