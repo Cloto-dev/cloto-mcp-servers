@@ -72,9 +72,11 @@ def _select_ort_providers() -> list:
     """Select ONNX Runtime execution providers with cross-platform fallback.
 
     Priority when ONNX_EP_PREFERENCE is empty (auto-detect):
-      1. CoreMLExecutionProvider (macOS)
-      2. DmlExecutionProvider (Windows — preserves existing behavior)
-      3. CPUExecutionProvider (always appended as terminal fallback)
+      1. CoreMLExecutionProvider (macOS — standard onnxruntime)
+      2. DmlExecutionProvider   (Windows — standard onnxruntime)
+      3. CUDAExecutionProvider  (Linux/Windows NVIDIA — requires onnxruntime-gpu)
+      4. ROCmExecutionProvider  (Linux AMD — requires onnxruntime ROCm build)
+      5. CPUExecutionProvider   (always appended as terminal fallback)
 
     When ONNX_EP_PREFERENCE is set, use the comma-separated list but always
     filter against get_available_providers() and always ensure CPUExecutionProvider
@@ -97,7 +99,12 @@ def _select_ort_providers() -> list:
         providers = [p for p in requested if p in available]
     else:
         providers = []
-        for candidate in ("CoreMLExecutionProvider", "DmlExecutionProvider"):
+        for candidate in (
+            "CoreMLExecutionProvider",   # macOS
+            "DmlExecutionProvider",      # Windows (DirectML)
+            "CUDAExecutionProvider",     # Linux/Windows NVIDIA (onnxruntime-gpu)
+            "ROCmExecutionProvider",     # Linux AMD (onnxruntime ROCm)
+        ):
             if candidate in available:
                 providers.append(candidate)
 
