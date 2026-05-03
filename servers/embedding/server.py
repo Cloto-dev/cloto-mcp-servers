@@ -55,6 +55,7 @@ _project_dir = os.environ.get("CLOTO_PROJECT_DIR", "")
 _MODEL_DIRS = {
     "onnx_miniml": "data/models/all-MiniLM-L6-v2",
     "onnx_jina_v5_nano": "data/models/jina-embeddings-v5-text-nano",
+    "onnx_bge_m3": "data/models/bge-m3",
 }
 _default_model_dir = _MODEL_DIRS.get(EMBEDDING_PROVIDER, "data/models/all-MiniLM-L6-v2")
 ONNX_MODEL_DIR = os.environ.get("ONNX_MODEL_DIR", "")
@@ -304,6 +305,152 @@ class OnnxMiniLMProvider(EmbeddingProvider):
 
 
 # ============================================================
+# CoreML-aware session factory (shared by ONNX providers)
+# ============================================================
+
+
+def _create_ort_session(model_path: str, providers: list):
+    """Create InferenceSession with CoreML-aware 3-stage fallback.
+
+    Stage 1: CoreML with MLProgram + dynamic shapes (ort 1.18+).
+    Stage 2: CoreML without provider_options (ort version mismatch tolerance).
+    Stage 3: CPU only (guaranteed fallback).
+    """
+    import onnxruntime as ort
+
+    if "CoreMLExecutionProvider" in providers:
+        rest = [p for p in providers if p != "CoreMLExecutionProvider"]
+        providers_with_opts = [
+            (
+                "CoreMLExecutionProvider",
+                {
+                    "ModelFormat": "MLProgram",
+                    "MLComputeUnits": "ALL",
+                    "RequireStaticInputShapes": "0",
+                },
+            ),
+            *rest,
+        ]
+        try:
+            return ort.InferenceSession(model_path, providers=providers_with_opts)
+        except Exception as e:
+            logger.warning("CoreML init with provider_options failed, retrying without options: %s", e)
+        try:
+            return ort.InferenceSession(model_path, providers=providers)
+        except Exception as e:
+            logger.warning("CoreML plain init failed, falling back to CPU-only: %s", e)
+        return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+
+    return ort.InferenceSession(model_path, providers=providers)
+
+
+# ============================================================
+# onnx_bge_m3 Provider
+# ============================================================
+
+
+class OnnxBgeM3Provider(EmbeddingProvider):
+    """Local BAAI/bge-m3 ONNX embedding provider (int8 quantized).
+
+    CLS-token pooling. 1024-dim dense output, 8K context, 100+ languages.
+    Based on XLM-RoBERTa — no token_type_ids.
+    """
+
+    def __init__(self, model_dir: str):
+        self._model_dir = model_dir
+        self._session = None
+        self._tokenizer = None
+        self._lock = asyncio.Lock()
+
+    async def initialize(self) -> None:
+        try:
+            import onnxruntime  # noqa: F401
+            from tokenizers import Tokenizer
+        except ImportError:
+            raise ImportError(
+                "onnx_bge_m3 provider requires: pip install onnxruntime tokenizers"
+            )
+
+        model_dir_abs = os.path.abspath(self._model_dir)
+        model_path = os.path.join(model_dir_abs, "model.onnx")
+        tokenizer_path = os.path.join(model_dir_abs, "tokenizer.json")
+
+        if not os.path.exists(model_path) or not os.path.exists(tokenizer_path):
+            logger.info("BGE-M3 ONNX model not found, downloading...")
+            try:
+                from download_model import download_bge_m3
+
+                if not download_bge_m3(model_dir_abs):
+                    raise FileNotFoundError(f"Failed to download BGE-M3 model to {model_dir_abs}")
+            except ImportError:
+                raise FileNotFoundError(
+                    f"ONNX model not found at {model_path}. "
+                    f"Download with: python embedding/download_model.py --model bge-m3"
+                )
+
+        providers = _select_ort_providers()
+        self._session = _create_ort_session(model_path, providers)
+        # chdir to model dir so sentencepiece.bpe.model is resolved via relative path in tokenizer.json
+        _prev_cwd = os.getcwd()
+        try:
+            os.chdir(model_dir_abs)
+            self._tokenizer = Tokenizer.from_file(tokenizer_path)
+        finally:
+            os.chdir(_prev_cwd)
+        bge_seq_len = min(ONNX_MAX_SEQ_LEN, 8192)
+        # XLM-RoBERTa pad token is <pad> (id=1)
+        self._tokenizer.enable_padding(pad_id=1, pad_token="<pad>", length=bge_seq_len)
+        self._tokenizer.enable_truncation(max_length=bge_seq_len)
+
+        logger.info(
+            "ONNX BGE-M3 provider initialized (dir=%s, seq_len=%d, requested=%s, active=%s)",
+            self._model_dir,
+            bge_seq_len,
+            providers,
+            self._session.get_providers(),
+        )
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not self._session or not self._tokenizer:
+            raise RuntimeError("Provider not initialized")
+
+        async with self._lock:
+            return await asyncio.get_event_loop().run_in_executor(None, self._embed_sync, texts)
+
+    def _embed_sync(self, texts: list[str]) -> list[list[float]]:
+        """Synchronous embedding with CLS-token pooling."""
+        encodings = self._tokenizer.encode_batch(texts)
+
+        input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
+        attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
+
+        input_names = [inp.name for inp in self._session.get_inputs()]
+        inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
+        if "token_type_ids" in input_names:
+            inputs["token_type_ids"] = np.zeros_like(input_ids)
+
+        outputs = self._session.run(None, inputs)
+        token_embeddings = outputs[0]  # (batch, seq_len, 1024)
+
+        # CLS-token pooling: first token of each sequence
+        cls_embs = token_embeddings[:, 0, :].astype(np.float32, copy=False)
+
+        # L2 normalization
+        norms = np.linalg.norm(cls_embs, axis=1, keepdims=True)
+        norms = np.clip(norms, a_min=1e-9, a_max=None)
+        normalized = cls_embs / norms
+
+        return normalized.tolist()
+
+    def dimensions(self) -> int:
+        return 1024
+
+    async def shutdown(self) -> None:
+        self._session = None
+        self._tokenizer = None
+
+
+# ============================================================
 # onnx_jina_v5_nano Provider
 # ============================================================
 
@@ -364,44 +511,7 @@ class OnnxJinaV5NanoProvider(EmbeddingProvider):
         )
 
     def _create_session_with_fallback(self, model_path: str, providers: list):
-        """Create InferenceSession with CoreML-aware 3-stage fallback.
-
-        Stage 1: CoreML with MLProgram + dynamic shapes (ort 1.18+). Required
-                 for Jina's variable seq_len + external-data (model.onnx_data).
-        Stage 2: CoreML without provider_options (ort version mismatch tolerance).
-        Stage 3: CPU only (guaranteed fallback).
-
-        When CoreML is not in the list, skip straight to plain session creation.
-        """
-        import onnxruntime as ort
-
-        if "CoreMLExecutionProvider" in providers:
-            rest = [p for p in providers if p != "CoreMLExecutionProvider"]
-            providers_with_opts = [
-                (
-                    "CoreMLExecutionProvider",
-                    {
-                        "ModelFormat": "MLProgram",
-                        "MLComputeUnits": "ALL",
-                        "RequireStaticInputShapes": "0",
-                    },
-                ),
-                *rest,
-            ]
-            try:
-                return ort.InferenceSession(model_path, providers=providers_with_opts)
-            except Exception as e:
-                logger.warning(
-                    "CoreML init with provider_options failed, retrying without options: %s",
-                    e,
-                )
-            try:
-                return ort.InferenceSession(model_path, providers=providers)
-            except Exception as e:
-                logger.warning("CoreML plain init failed, falling back to CPU-only: %s", e)
-            return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
-
-        return ort.InferenceSession(model_path, providers=providers)
+        return _create_ort_session(model_path, providers)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not self._session or not self._tokenizer:
@@ -620,9 +730,12 @@ def create_provider() -> EmbeddingProvider:
         return OnnxMiniLMProvider(model_dir=ONNX_MODEL_DIR)
     elif EMBEDDING_PROVIDER == "onnx_jina_v5_nano":
         return OnnxJinaV5NanoProvider(model_dir=ONNX_MODEL_DIR)
+    elif EMBEDDING_PROVIDER == "onnx_bge_m3":
+        return OnnxBgeM3Provider(model_dir=ONNX_MODEL_DIR)
     else:
         raise ValueError(
-            f"Unknown embedding provider: {EMBEDDING_PROVIDER}. Supported: api_openai, onnx_miniml, onnx_jina_v5_nano"
+            f"Unknown embedding provider: {EMBEDDING_PROVIDER}. "
+            f"Supported: api_openai, onnx_miniml, onnx_jina_v5_nano, onnx_bge_m3"
         )
 
 
