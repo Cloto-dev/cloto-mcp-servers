@@ -822,8 +822,11 @@ def create_provider() -> EmbeddingProvider:
     elif EMBEDDING_PROVIDER == "onnx_bge_m3":
         return OnnxBgeM3Provider(model_dir=ONNX_MODEL_DIR)
     elif EMBEDDING_PROVIDER == "mlx_bge_m3":
-        mlx_path = os.environ.get("MLX_MODEL_DIR", "") or _resolve_model_dir("mlx_bge_m3")
-        return MlxBgeM3Provider(model_path=mlx_path or MLX_BGE_M3_REPO)
+        mlx_path = os.environ.get("MLX_MODEL_DIR", "")
+        if not mlx_path:
+            local = _resolve_model_dir("mlx_bge_m3")
+            mlx_path = local if os.path.isdir(local) else MLX_BGE_M3_REPO
+        return MlxBgeM3Provider(model_path=mlx_path)
     elif EMBEDDING_PROVIDER == "auto_bge_m3":
         if _is_apple_silicon() and _mlx_available():
             mlx_path = os.environ.get("MLX_MODEL_DIR", "") or MLX_BGE_M3_REPO
