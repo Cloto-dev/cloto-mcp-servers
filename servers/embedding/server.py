@@ -11,6 +11,7 @@ Design: docs/CPERSONA_MEMORY_DESIGN.md Section 5
 import asyncio
 import logging
 import os
+import platform as _platform
 import struct
 import sys
 from abc import ABC, abstractmethod
@@ -56,6 +57,7 @@ _MODEL_DIRS = {
     "onnx_miniml": "data/models/all-MiniLM-L6-v2",
     "onnx_jina_v5_nano": "data/models/jina-embeddings-v5-text-nano",
     "onnx_bge_m3": "data/models/bge-m3",
+    "mlx_bge_m3": "data/models/bge-m3-mlx",
 }
 _default_model_dir = _MODEL_DIRS.get(EMBEDDING_PROVIDER, "data/models/all-MiniLM-L6-v2")
 ONNX_MODEL_DIR = os.environ.get("ONNX_MODEL_DIR", "")
@@ -305,6 +307,24 @@ class OnnxMiniLMProvider(EmbeddingProvider):
 
 
 # ============================================================
+# Platform detection helpers
+# ============================================================
+
+
+def _is_apple_silicon() -> bool:
+    return sys.platform == "darwin" and _platform.machine() == "arm64"
+
+
+def _mlx_available() -> bool:
+    try:
+        import mlx.core  # noqa: F401
+        import mlx_embeddings  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+# ============================================================
 # CoreML-aware session factory (shared by ONNX providers)
 # ============================================================
 
@@ -342,6 +362,73 @@ def _create_ort_session(model_path: str, providers: list):
         return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
 
     return ort.InferenceSession(model_path, providers=providers)
+
+
+# ============================================================
+# mlx_bge_m3 Provider (macOS Apple Silicon only)
+# ============================================================
+
+MLX_BGE_M3_REPO = "mlx-community/bge-m3-mlx-fp16"
+
+
+class MlxBgeM3Provider(EmbeddingProvider):
+    """Apple Silicon MLX bge-m3 provider (fp16, Metal/ANE accelerated).
+
+    Uses mlx-embeddings to run BAAI/bge-m3 natively on Metal GPU.
+    macOS ARM only — auto_bge_m3 falls back to OnnxBgeM3Provider on other platforms.
+    """
+
+    def __init__(self, model_path: str = MLX_BGE_M3_REPO):
+        # model_path: HuggingFace repo ID or absolute local directory
+        self._model_path = model_path
+        self._model = None
+        self._tokenizer = None
+        self._lock = asyncio.Lock()
+
+    async def initialize(self) -> None:
+        try:
+            from mlx_embeddings.utils import load as mlx_load
+        except ImportError:
+            raise ImportError("mlx_bge_m3 requires: pip install mlx-embeddings")
+
+        self._model, self._tokenizer = await asyncio.get_event_loop().run_in_executor(
+            None, mlx_load, self._model_path
+        )
+        logger.info("MLX BGE-M3 provider initialized (path=%s)", self._model_path)
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not self._model or not self._tokenizer:
+            raise RuntimeError("Provider not initialized")
+
+        async with self._lock:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, self._embed_sync, texts
+            )
+
+    def _embed_sync(self, texts: list[str]) -> list[list[float]]:
+        import mlx.core as mx
+
+        inputs = self._tokenizer.batch_encode_plus(
+            texts,
+            return_tensors="mlx",
+            padding=True,
+            truncation=True,
+            max_length=min(ONNX_MAX_SEQ_LEN, 8192),
+        )
+        outputs = self._model(
+            inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+        )
+        embs = outputs.text_embeds  # already L2-normalized
+        mx.eval(embs)
+        return embs.tolist()
+
+    def dimensions(self) -> int:
+        return 1024
+
+    async def shutdown(self) -> None:
+        self._model = None
+        self._tokenizer = None
 
 
 # ============================================================
@@ -711,6 +798,14 @@ _vector_index: VectorIndex | None = None
 # ============================================================
 
 
+def _resolve_model_dir(provider_key: str) -> str:
+    """Resolve model directory for a provider key, respecting CLOTO_PROJECT_DIR."""
+    rel = _MODEL_DIRS.get(provider_key, "data/models/bge-m3")
+    if _project_dir and not os.path.isabs(rel):
+        return os.path.join(_project_dir, rel)
+    return rel
+
+
 def create_provider() -> EmbeddingProvider:
     """Create an embedding provider based on configuration."""
     if EMBEDDING_PROVIDER == "api_openai":
@@ -726,10 +821,21 @@ def create_provider() -> EmbeddingProvider:
         return OnnxJinaV5NanoProvider(model_dir=ONNX_MODEL_DIR)
     elif EMBEDDING_PROVIDER == "onnx_bge_m3":
         return OnnxBgeM3Provider(model_dir=ONNX_MODEL_DIR)
+    elif EMBEDDING_PROVIDER == "mlx_bge_m3":
+        mlx_path = os.environ.get("MLX_MODEL_DIR", "") or _resolve_model_dir("mlx_bge_m3")
+        return MlxBgeM3Provider(model_path=mlx_path or MLX_BGE_M3_REPO)
+    elif EMBEDDING_PROVIDER == "auto_bge_m3":
+        if _is_apple_silicon() and _mlx_available():
+            mlx_path = os.environ.get("MLX_MODEL_DIR", "") or MLX_BGE_M3_REPO
+            logger.info("auto_bge_m3: Apple Silicon detected, using MLX provider")
+            return MlxBgeM3Provider(model_path=mlx_path)
+        logger.info("auto_bge_m3: falling back to ONNX CPU provider")
+        return OnnxBgeM3Provider(model_dir=ONNX_MODEL_DIR)
     else:
         raise ValueError(
             f"Unknown embedding provider: {EMBEDDING_PROVIDER}. "
-            f"Supported: api_openai, onnx_miniml, onnx_jina_v5_nano, onnx_bge_m3"
+            f"Supported: api_openai, onnx_miniml, onnx_jina_v5_nano, onnx_bge_m3, "
+            f"mlx_bge_m3, auto_bge_m3"
         )
 
 
