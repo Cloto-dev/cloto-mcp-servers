@@ -390,13 +390,7 @@ class OnnxBgeM3Provider(EmbeddingProvider):
 
         providers = _select_ort_providers()
         self._session = _create_ort_session(model_path, providers)
-        # chdir to model dir so sentencepiece.bpe.model is resolved via relative path in tokenizer.json
-        _prev_cwd = os.getcwd()
-        try:
-            os.chdir(model_dir_abs)
-            self._tokenizer = Tokenizer.from_file(tokenizer_path)
-        finally:
-            os.chdir(_prev_cwd)
+        self._tokenizer = Tokenizer.from_file(tokenizer_path)
         bge_seq_len = min(ONNX_MAX_SEQ_LEN, 8192)
         # XLM-RoBERTa pad token is <pad> (id=1)
         self._tokenizer.enable_padding(pad_id=1, pad_token="<pad>", length=bge_seq_len)
